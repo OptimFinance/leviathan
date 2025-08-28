@@ -1,6 +1,5 @@
-use aiken/transaction.{
-  ScriptContext,
-}
+use cardano/transaction.{Transaction,OutputReference}
+use cardano/assets.{PolicyId}
 use account/types.{
   ApprovedApprovalDatum,
   ApprovedApprovalRedeemer,
@@ -9,19 +8,20 @@ use account/types.{
 }
 use account/utils.{id_spent, burn_own_id, mint_own_id}
 
-validator (key: Id) {
-  fn mint(redeemer: IdMintRedeemer, ctx: ScriptContext) -> Bool {
+validator approved_approval(key: Id) {
+  mint(redeemer: IdMintRedeemer, own_policy_id: PolicyId, self: Transaction) -> Bool {
     and{
-      id_spent(key, ctx.transaction.inputs),
-      mint_own_id(redeemer, ctx, fn(_, _) { True })
+      id_spent(key, self.inputs),
+      mint_own_id(redeemer, own_policy_id, self, fn(_, _) { True })
     }
   }
 
-  fn spend(
-    _datum: ApprovedApprovalDatum,
+  spend(
+    _datum: Option<ApprovedApprovalDatum>,
     _redeemer: ApprovedApprovalRedeemer,
-    ctx: ScriptContext
+    own_input_ref: OutputReference,
+    self: Transaction
   ) -> Bool {
-    id_spent(key, ctx.transaction.inputs) && burn_own_id(ctx)
+    id_spent(key, self.inputs) && burn_own_id(own_input_ref, self)
   }
 }

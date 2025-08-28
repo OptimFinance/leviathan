@@ -1,13 +1,8 @@
-use aiken/dict.{Dict}
-use aiken/hash.{Blake2b_224, Blake2b_256, Hash}
-use aiken/transaction.{OutputReference}
-use aiken/transaction/credential.{
-  Script,
-  Signature,
-  PaymentCredential,
-  VerificationKey,
-}
-use aiken/transaction/value.{AssetName, PolicyId, Value}
+use aiken/collection/dict.{Dict}
+use aiken/crypto.{Blake2b_224, Blake2b_256, Hash, Script, Signature, VerificationKey}
+use cardano/transaction.{OutputReference}
+use cardano/address.{PaymentCredential}
+use cardano/assets.{AssetName, PolicyId}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Plutus helper types
@@ -28,11 +23,15 @@ pub type Id {
 pub type Intent {
   account_id: Id,
   app_id: Id,
-  signature: Signature,
-  header: String,
+  header: ByteArray,
   nonce: Int,
   fee: Int,
-  payload: String
+  payload: ByteArray
+}
+
+pub type SignedIntent {
+  intent: Intent,
+  signature: Signature
 }
 
 pub type VirtualAddress {
@@ -51,14 +50,14 @@ pub type Approval {
 pub type Action {
   MoveTokens {
     app_id: Id,
-    tokens: Value,
+    tokens: Pairs<PolicyId, Pairs<AssetName, Int>>,
     sender: VirtualAddress,
     recipient: VirtualAddress
   }
 }
 
 pub type IntentActionsRedeemer {
-  intents: List<Intent>,
+  intents: List<SignedIntent>,
   actions: List<Action>
 }
 
