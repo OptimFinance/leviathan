@@ -31,6 +31,10 @@ pub type Intent {
 
 pub type SignedIntent {
   intent: Intent,
+  protected: ByteArray,
+  external_aad: ByteArray,
+  hashed: Bool,
+  indefinite_bytestring: Bool,
   signature: Signature
 }
 
