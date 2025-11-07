@@ -11,7 +11,6 @@ use cardano/transaction.{
   Withdraw
 }
 use cardano/address.{
-  
   Script,
 }
 use cardano/assets.{PolicyId}
@@ -26,6 +25,7 @@ use account/types.{
   DataMap,
   FundAccount,
   IdMintRedeemer,
+  InboxDatum,
   IntentActionsRedeemer,
   MoveTokens,
   RawAddress,
@@ -223,5 +223,11 @@ validator account(approvals_map: ScriptHash, approved_approvals: ScriptHash, alw
             self.datums
           )
       }
+  }
+}
+
+validator inbox() {
+  spend(_datum: Option<InboxDatum>, _redeemer: Data, _own_input_ref: OutputReference, _self: Transaction) -> Bool {
+    True
   }
 }

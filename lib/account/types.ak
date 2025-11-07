@@ -86,6 +86,10 @@ pub type AccountRedeemer {
   SpendAccount
 }
 
+pub type InboxDatum {
+  recipient: KeyHash
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Approval data
 
