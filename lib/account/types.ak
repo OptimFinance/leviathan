@@ -1,7 +1,6 @@
 use aiken/collection/dict.{Dict}
 use aiken/crypto.{Blake2b_224, Blake2b_256, Hash, Script, Signature, VerificationKey}
 use cardano/transaction.{OutputReference}
-use cardano/address.{PaymentCredential}
 use cardano/assets.{AssetName, PolicyId}
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -11,6 +10,7 @@ pub type ScriptHash = Hash<Blake2b_224, Script>
 pub type KeyHash = Hash<Blake2b_224, VerificationKey>
 pub type DataHash = Hash<Blake2b_256, Data>
 pub type DataMap = Dict<DataHash, Data>
+pub type AssetList = Pairs<PolicyId, Pairs<AssetName, Int>>
 
 ////////////////////////////////////////////////////////////////////////////////
 // High-level application types
@@ -20,13 +20,23 @@ pub type Id {
   asset_name: AssetName
 }
 
+pub type IntentPayload {
+  SendIntent {
+    recipient: AssetName,
+    assets: AssetList
+  }
+  ExchangeIntent {
+    offer: AssetList,
+    demand: AssetList
+  }
+}
+
 pub type Intent {
-  account_id: Id,
-  app_id: Id,
-  header: ByteArray,
+  account: AssetName,
   nonce: Int,
   fee: Int,
-  payload: ByteArray
+  payload: IntentPayload,
+  partial: Bool
 }
 
 pub type SignedIntent {
@@ -38,31 +48,28 @@ pub type SignedIntent {
   signature: Signature
 }
 
-pub type VirtualAddress {
-  AccountAddress{ id: Id }
-  IdAddress{ id: Id }
-  RawAddress{ credential: PaymentCredential }
-  ZeroAddress
-}
+// ratio and continuing output index, or `None` for full
+pub type IntentSatisfaction = Option<((Int, Int), Int)>
 
-pub type Approval {
-  ApprovedPolicy{ id: PolicyId }
-  ApprovedId{ id: Id }
-  ApprovedIntentAnnouncer{ script: ScriptHash }
-}
-
-pub type Action {
-  MoveTokens {
-    app_id: Id,
-    tokens: Pairs<PolicyId, Pairs<AssetName, Int>>,
-    sender: VirtualAddress,
-    recipient: VirtualAddress
+pub type IntentRedeemer {
+  NoncedIntent {
+    intent: SignedIntent,
+  }
+  SpentIntent {
+    input_index: Int,
   }
 }
 
-pub type IntentActionsRedeemer {
-  intents: List<SignedIntent>,
-  actions: List<Action>
+pub type UtxoIntent {
+  account: AssetName,
+  fee: Int,
+  exchange: IntentPayload,
+  partial: Bool
+}
+
+pub type AccountSpend {
+  account: AssetName,
+  intents: List<(IntentRedeemer, IntentSatisfaction)>,
 }
 
 pub type IdMintRedeemer {
@@ -74,39 +81,17 @@ pub type IdMintRedeemer {
 // Account data
 
 pub type AccountDatum {
-  account_id: Id,
-  owner: KeyHash,
+  id: AssetName,
   verification_key: VerificationKey,
+  pub_key_hash: KeyHash,
   nonce: Int,
-  intent_hash: ScriptHash
 }
 
 pub type AccountRedeemer {
-  FundAccount
-  SpendAccount
+  SyncAccounts()
+  SpendAccounts(List<AccountSpend>)
 }
 
 pub type InboxDatum {
   recipient: KeyHash
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Approval data
-
-pub type ApprovalDatum {
-  owner: KeyHash,
-  approved: Approval
-}
-
-pub type ApprovalRedeemer {
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Approved approvals data
-
-pub type ApprovedApprovalDatum {
-  approved: Approval
-}
-
-pub type ApprovedApprovalRedeemer {
 }
