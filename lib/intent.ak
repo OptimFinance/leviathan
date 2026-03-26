@@ -5,6 +5,7 @@ use cardano/transaction.{InlineDatum, Input, Output, OutputReference}
 use cardano/address.{Address, Script}
 use cardano/assets
 use account/types.{
+  Account,
   AccountDatum,
   Intent,
   SignedIntent,
@@ -22,7 +23,7 @@ pub fn valid_intent(
   }: SignedIntent,
   account_input: Input,
 ) {
-  expect account_datum: AccountDatum = {
+  expect Account{verification_key, ..}: AccountDatum = {
     expect InlineDatum(datum) = account_input.output.datum
     datum
   }
@@ -49,7 +50,7 @@ pub fn valid_intent(
     bytearray.concat(payload) |>
     if (hashed) { crypto.blake2b_224 } else { fn (x) {x} }
 
-  verify_ed25519_signature(account_datum.verification_key, message, signature)?
+  verify_ed25519_signature(verification_key, message, signature)?
 }
 
 test signature_valid() {
@@ -85,7 +86,7 @@ test signature_valid() {
           stake_credential: None
         },
         value: assets.from_asset_list([Pair(account_script, [Pair("", 1)])]),
-        datum: InlineDatum(AccountDatum {
+        datum: InlineDatum(Account {
           id: "",
           pub_key_hash: #"2042e66ff84b5b5cbfc64cc769682eb9ea55ec8a186c2fbe49c8dc72",
           verification_key: #"c1732fa372ce6dcea07a0ff842a1988bc5989faba463bca5aee3d5473e35c089",

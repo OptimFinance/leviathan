@@ -49,8 +49,6 @@ pub type SignedIntent {
 }
 
 // ratio and continuing output index, or `None` for full
-pub type IntentSatisfaction = Option<((Int, Int), Int)>
-
 pub type IntentRedeemer {
   NoncedIntent {
     intent: SignedIntent,
@@ -60,16 +58,22 @@ pub type IntentRedeemer {
   }
 }
 
-pub type UtxoIntent {
-  account: AssetName,
-  fee: Int,
-  exchange: IntentPayload,
-  partial: Bool
+@list
+pub type IntentSatisfaction {
+  num: Int,
+  denom: Int,
+}
+
+@list
+pub type SpendRedeemer {
+  redeemer: IntentRedeemer,
+  satisfaction: Option<IntentSatisfaction>
 }
 
 pub type AccountSpend {
   account: AssetName,
-  intents: List<(IntentRedeemer, IntentSatisfaction)>,
+  intents: List<SpendRedeemer>,
+  outputs_start: Option<Int>,
 }
 
 pub type IdMintRedeemer {
@@ -81,17 +85,26 @@ pub type IdMintRedeemer {
 // Account data
 
 pub type AccountDatum {
-  id: AssetName,
-  verification_key: VerificationKey,
-  pub_key_hash: KeyHash,
-  nonce: Int,
+  Account {
+    id: AssetName,
+    verification_key: VerificationKey,
+    pub_key_hash: KeyHash,
+    nonce: Int,
+  }
+  Inbox {
+    id: AssetName,
+    pub_key_hash: KeyHash
+  }
+  UtxoIntent {
+    account: AssetName,
+    fee: Int,
+    exchange: IntentPayload,
+    partial: Bool
+  }
 }
+
 
 pub type AccountRedeemer {
   SyncAccounts()
   SpendAccounts(List<AccountSpend>)
-}
-
-pub type InboxDatum {
-  recipient: KeyHash
 }

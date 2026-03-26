@@ -1,9 +1,10 @@
+use aiken/builtin
 use aiken/collection/list
 use aiken/collection/pairs
 use aiken/collection/dict.{Dict}
 use aiken/crypto.{blake2b_224}
 use aiken/math/rational
-use aiken/math.{min}
+use aiken/math.{max}
 use aiken/option
 use cardano/transaction.{
   Input,
@@ -14,6 +15,7 @@ use cardano/transaction.{
   Withdraw,
 }
 use cardano/address.{
+  Address,
   Credential,
   Script,
   VerificationKey,
@@ -21,24 +23,23 @@ use cardano/address.{
 use cardano/assets.{AssetName, PolicyId, Value}
 use account/types.{
   AccountDatum,
+  Account,
+  Inbox,
+  UtxoIntent,
   AccountRedeemer,
   AssetList,
   ExchangeIntent,
   IdMintRedeemer,
-  InboxDatum,
   Intent,
-  KeyHash,
+  IntentSatisfaction, KeyHash,
   NoncedIntent,
-  ScriptHash,
   AccountSpend,
   SendIntent,
   SpentIntent,
   SyncAccounts,
   SpendAccounts,
-  UtxoIntent,
 }
 use account/utils.{
-  get_output_datum,
   mint_own_id
 }
 
@@ -49,11 +50,11 @@ type OwnerAccumulator {
   gain: Value,
   loss: Value,
   nonce: Int,
+  num_continuing_outputs: Int,
 }
 
-fn list_sync(
+pub fn list_sync(
   account_script: Credential,
-  inbox_script: Credential,
   inputs: List<Input>,
   outputs: List<Output>,
 ) -> Bool {
@@ -61,17 +62,14 @@ fn list_sync(
     let credential = output.address.payment_credential
     
     if credential == account_script {
-      expect datum: AccountDatum = {
-        expect InlineDatum(datum) = output.datum
-        datum
+      expect InlineDatum(datum) = output.datum
+      if datum is Account{pub_key_hash, ..}: AccountDatum {
+        Some(pub_key_hash)
+      } else if datum is Inbox{pub_key_hash, ..}: AccountDatum {
+        Some(pub_key_hash)
+      } else {
+        None
       }
-      Some(datum.pub_key_hash)
-    } else if credential == inbox_script {
-      expect datum: KeyHash = {
-        expect InlineDatum(datum) = output.datum
-        datum
-      }
-      Some(datum)
     } else {
       when credential is {
         VerificationKey(pkh) -> Some(pkh)
@@ -117,11 +115,10 @@ fn list_sync(
 
 fn validate_syncs(
   account_script: Credential,
-  inbox_script: Credential,
   inputs: List<Input>,
   outputs: List<Output>,
 ) -> Bool {
-  list_sync(account_script, inbox_script, inputs, outputs)
+  list_sync(account_script, inputs, outputs)
 }
 
 fn merge(a: Dict<AssetName, OwnerAccumulator>, b: Dict<AssetName, OwnerAccumulator>) {
@@ -130,7 +127,8 @@ fn merge(a: Dict<AssetName, OwnerAccumulator>, b: Dict<AssetName, OwnerAccumulat
       input: option.choice([b.input, a.input]),
       gain: assets.merge(a.gain, b.gain),
       loss: assets.merge(a.loss, b.loss),
-      nonce: min(a.nonce, b.nonce)
+      nonce: max(a.nonce, b.nonce),
+      num_continuing_outputs: a.num_continuing_outputs + b.num_continuing_outputs,
     })
   })
 }
@@ -155,150 +153,221 @@ fn scale(assets: AssetList, (num, denom): (Int, Int)) {
 fn validate_spends(
   spends: List<AccountSpend>,
   account_script: Credential,
-  utxo_intent_script: ScriptHash,
   inputs: List<Input>,
   outputs: List<Output>,
 ) -> Bool {
+  expect Script(account_script_hash) = account_script
   expect [], account_data <- list.foldl2(
     inputs,
     spends,
     dict.empty,
     fn (input, remaining_spends, acc, return) {
       if input.output.address.payment_credential == account_script {
-        expect datum: AccountDatum = {
-          expect InlineDatum(datum) = input.output.datum
-          datum
-        }
-        let account_id = datum.id
-        when remaining_spends is {
-          [spend, ..remaining] -> {
-            let AccountSpend{account, intents} = spend
-            let updates = list.foldl(
-              intents,
-              dict.empty,
-              fn (redeemer, acc) {
-                let (satisfaction, continuing_datum) = when redeemer.2nd is {
-                  Some(((num, denom), output_index)) -> {
-                    expect Some(s) = rational.new(num, denom)
-                    expect rational.compare(s, rational.zero) != Less
-                    expect rational.compare(s, rational.from_int(1)) != Greater
-                    expect Some(output) = list.at(outputs, output_index)
-                    expect utxo_intent_datum: UtxoIntent = {
-                      expect InlineDatum(datum) = output.datum
-                      datum
-                    }
-                    expect and{
-                      output.address.payment_credential == Script(utxo_intent_script),
-                      assets.has_any_nft(output.value, utxo_intent_script)
-                    }
+        expect InlineDatum(datum) = input.output.datum
+        if datum is Account{id: datum_id, nonce: datum_nonce, ..}: AccountDatum {
+          let account_id = datum_id
+          when remaining_spends is {
+            [spend, ..remaining] -> {
+              let AccountSpend{account, intents, outputs_start} = spend
+              expect account == account_id
 
-                    ((num, denom), Some(utxo_intent_datum))
+              // check that all continuing outputs for this user are in sequence
+              // beginning at `outputs_start`. when traversing the outputs we
+              // ensure that the number of `UtxoIntent` outputs found for this
+              // account matches the number of distinct outputs validated
+              // beginning at this index
+              let continuing_outputs = outputs_start
+                |> option.map(list.drop(outputs, _)) 
+                |> option.or_else([])
+
+              let updates, _ <- list.foldl2(
+                intents,
+                dict.from_ascending_pairs([Pair(
+                  account_id,
+                  OwnerAccumulator {
+                    input: Some(input),
+                    gain: assets.zero,
+                    loss: assets.zero,
+                    nonce: datum_nonce,
+                    num_continuing_outputs: 0,
                   }
-                  None -> ((1, 1), None)
-                }
-                let complement = (satisfaction.2nd - satisfaction.1st, satisfaction.2nd)
-                let update = when redeemer.1st is {
-                  NoncedIntent{intent: signed_intent} -> {
-                    expect valid_intent(signed_intent, input)
-                    let Intent{fee, nonce, partial, payload, account: intent_account} = signed_intent.intent
-                    expect intent_account == account
-                    expect nonce >= datum.nonce
-                    when payload is {
-                      SendIntent{recipient, assets} -> {
-                        expect satisfaction.1st == satisfaction.2nd
-                        let value = assets.from_asset_list(scale(assets, satisfaction))
-                        dict.from_pairs([
-                          Pair(
-                            recipient,
-                            OwnerAccumulator {
-                              input: None,
-                              gain: value,
-                              loss: assets.zero,
-                              nonce: 0
-                            }
-                          ),
-                          Pair(
-                            account_id,
-                            OwnerAccumulator {
-                              input: Some(input),
-                              gain: assets.zero,
-                              loss: assets.add(value, "", "", -fee),
-                              nonce,
-                            }
-                          )
-                        ])
+                )]),
+                continuing_outputs,
+                fn (redeemer, acc, continuing_outputs, return) {
+                  let (satisfaction, continuing_datum) = when redeemer.satisfaction is {
+                    Some(IntentSatisfaction{ num, denom }) -> {
+                      expect Some(s) = rational.new(num, denom)
+                      expect Some(output) = list.head(continuing_outputs)
+                      expect UtxoIntent{..} as utxo_intent_datum: AccountDatum = {
+                        expect InlineDatum(datum) = output.datum
+                        datum
                       }
-                      ExchangeIntent{offer, demand} -> {
-                        expect or{
-                          partial,
-                          satisfaction.1st == satisfaction.2nd
+
+                      expect and{
+                        rational.compare(s, rational.zero) != Less,
+                        rational.compare(s, rational.from_int(1)) != Greater,
+                        output.address.payment_credential == account_script,
+                        assets.has_any_nft(output.value, account_script_hash)
+                      }
+
+                      ((num, denom), Some(utxo_intent_datum))
+                    }
+                    None -> ((1, 1), None)
+                  }
+                  let num_continuing_outputs = if option.is_some(continuing_datum) { 1 } else { 0 }
+                  let complement = (satisfaction.2nd - satisfaction.1st, satisfaction.2nd)
+                  let update = when redeemer.redeemer is {
+                    NoncedIntent{intent: signed_intent} -> {
+                      expect valid_intent(signed_intent, input)
+                      let Intent{fee, nonce, partial, payload, account: intent_account} = signed_intent.intent
+                      expect intent_account == account
+                      expect nonce >= datum_nonce
+                      when payload is {
+                        SendIntent{recipient, assets} -> {
+                          expect num_continuing_outputs == 0
+                          let value = assets.from_asset_list(assets)
+                          dict.from_pairs([
+                            Pair(
+                              recipient,
+                              OwnerAccumulator {
+                                input: None,
+                                gain: value,
+                                loss: assets.zero,
+                                nonce: 0,
+                                num_continuing_outputs,
+                              }
+                            ),
+                            Pair(
+                              account_id,
+                              OwnerAccumulator {
+                                input: None,
+                                gain: assets.zero,
+                                loss: assets.add(value, "", "", fee),
+                                nonce,
+                                num_continuing_outputs,
+                              }
+                            )
+                          ])
                         }
+                        ExchangeIntent{offer, demand} -> {
+                          if satisfaction.1st != satisfaction.2nd {
+                            let satisfied_demand = assets.from_asset_list(scale(demand, satisfaction))
+                            let satisfied_offer = assets.from_asset_list(scale(offer, satisfaction))
+                            let remaining_demand = scale(demand, complement)
+                            let remaining_offer = scale(offer, complement)
+                          
+                            let expected_continuing_datum = UtxoIntent {
+                              account,
+                              fee,
+                              exchange: ExchangeIntent {
+                                offer: remaining_offer,
+                                demand: remaining_demand
+                              },
+                              partial
+                            }
+
+                            expect and {
+                              continuing_datum == Some(expected_continuing_datum),
+                              or {
+                                partial,
+                                satisfaction.1st == 0
+                              }
+                            }
+
+                            dict.from_ascending_pairs([Pair(
+                              account_id,
+                              OwnerAccumulator {
+                                input: None,
+                                gain: satisfied_demand,
+                                loss: assets.add(satisfied_offer, "", "", fee),
+                                nonce,
+                                num_continuing_outputs,
+                              }
+                            )])
+                          } else {
+                            dict.from_ascending_pairs([Pair(
+                              account_id,
+                              OwnerAccumulator {
+                                input: None,
+                                gain: assets.from_asset_list(demand),
+                                loss: assets.add(assets.from_asset_list(offer), "", "", fee),
+                                nonce,
+                                num_continuing_outputs,
+                              }
+                            )])
+                          }
+                        }
+                      }
+                    }
+                    SpentIntent{input_index} -> {
+                      expect Some(intent_input) = list.at(inputs, input_index)
+                      expect UtxoIntent{exchange, account, fee, partial}: AccountDatum = {
+                        expect InlineDatum(datum) = intent_input.output.datum
+                        datum
+                      }
+                      expect ExchangeIntent{offer, demand} = exchange
+
+                      if satisfaction.1st != satisfaction.2nd {
                         let satisfied_demand = assets.from_asset_list(scale(demand, satisfaction))
                         let satisfied_offer = assets.from_asset_list(scale(offer, satisfaction))
                         let remaining_demand = scale(demand, complement)
                         let remaining_offer = scale(offer, complement)
+
                         let expected_continuing_datum = UtxoIntent {
                           account,
                           fee,
+                          partial,
                           exchange: ExchangeIntent {
                             offer: remaining_offer,
                             demand: remaining_demand
                           },
+                        }
+
+                        expect and {
+                          continuing_datum == Some(expected_continuing_datum),
                           partial
                         }
-                        expect continuing_datum == Some(expected_continuing_datum)
 
                         dict.from_ascending_pairs([Pair(
                           account_id,
                           OwnerAccumulator {
-                            input: Some(input),
+                            input: None,
                             gain: satisfied_demand,
                             loss: assets.add(satisfied_offer, "", "", fee),
-                            nonce
+                            nonce: 0,
+                            num_continuing_outputs,
+                          }
+                        )])
+                      } else {
+                        dict.from_ascending_pairs([Pair(
+                          account_id,
+                          OwnerAccumulator {
+                            input: None,
+                            gain: assets.from_asset_list(demand),
+                            loss: assets.add(assets.from_asset_list(offer), "", "", fee),
+                            nonce: 0,
+                            num_continuing_outputs,
                           }
                         )])
                       }
                     }
                   }
-                  SpentIntent{input_index} -> {
-                    expect Some(intent_input) = list.at(inputs, input_index)
-                    expect intent_datum: UtxoIntent = {
-                      expect InlineDatum(datum) = intent_input.output.datum
-                      datum
+                  return(
+                    merge(acc, update),
+                    if num_continuing_outputs == 0 {
+                      continuing_outputs
+                    } else {
+                      builtin.tail_list(continuing_outputs)
                     }
-                    expect or{
-                      intent_datum.partial,
-                      satisfaction.1st == satisfaction.2nd
-                    }
-                    expect ExchangeIntent{offer, demand} = intent_datum.exchange
-                    let remaining_demand = scale(demand, complement)
-                    let remaining_offer = scale(offer, complement)
-                    let expected_continuing_datum = UtxoIntent {
-                      ..intent_datum,
-                      exchange: ExchangeIntent {
-                        offer: remaining_offer,
-                        demand: remaining_demand
-                      },
-                    }
-                    expect continuing_datum == Some(expected_continuing_datum)
-
-                    dict.from_ascending_pairs([Pair(
-                      account_id,
-                      OwnerAccumulator {
-                        input: Some(input),
-                        gain: assets.from_asset_list(scale(demand, satisfaction)),
-                        loss: assets.add(assets.from_asset_list(scale(offer, satisfaction)), "", "", -intent_datum.fee),
-                        nonce: 0
-                      }
-                    )])
-                  }
+                  )
                 }
-                merge(acc, update)
-              }
-            )
-            return(remaining, merge(acc, updates))
+              )
+              return(remaining, merge(acc, updates))
+            }
+            _ -> return(remaining_spends, acc)
           }
-          _ -> return(remaining_spends, acc)
+        } else {
+          return(remaining_spends, acc)
         }
       } else {
         return(remaining_spends, acc)
@@ -311,36 +380,51 @@ fn validate_spends(
     dict.to_pairs(account_data),
     fn (output, remaining_account_data) {
       if output.address.payment_credential == account_script {
-        expect datum: AccountDatum = {
-          expect InlineDatum(datum) = output.datum
-          datum
-        }
-        when remaining_account_data is {
-          [account_data, ..new_account_data] -> {
-            let Pair(account_id, OwnerAccumulator{input, gain, loss, nonce}) = account_data
-            expect Some(input) = input
-            let delta = assets.merge(output.value, assets.negate(input.output.value))
+        expect InlineDatum(datum) = output.datum
+        if datum is Account{id: datum_id, nonce: datum_nonce, ..}: AccountDatum {
+          when remaining_account_data is {
+            [account_data, ..new_account_data] -> {
+              let Pair(account_id, OwnerAccumulator{input, gain, loss, nonce, num_continuing_outputs}) = account_data
+              expect Some(input) = input
+              let delta = assets.merge(output.value, assets.negate(input.output.value))
 
-            let correct_loss = assets.reduce(delta, True, fn (policy_id, asset_name, quantity, acc) {
-              acc && or{
-                quantity > 0,
-                -quantity <= assets.quantity_of(loss, policy_id, asset_name)
+              let correct_loss = assets.reduce(delta, True, fn (policy_id, asset_name, token_delta, acc) {
+                acc && or{
+                  token_delta >= 0,
+                  -token_delta <= assets.quantity_of(loss, policy_id, asset_name)
+                }
+              })
+
+              let correct_gain = assets.reduce(gain, True, fn (policy_id, asset_name, expected_gain, acc) {
+                acc && assets.quantity_of(delta, policy_id, asset_name) >= expected_gain
+              })
+
+              expect and {
+                account_id == datum_id,
+                datum_nonce > nonce,
+                correct_loss,
+                correct_gain,
+                num_continuing_outputs == 0,
               }
-            })
-
-            let correct_gain = assets.reduce(gain, True, fn (policy_id, asset_name, quantity, acc) {
-              acc && assets.quantity_of(delta, policy_id, asset_name) >= quantity
-            })
-
-            expect and {
-              account_id == datum.id,
-              datum.nonce > nonce,
-              correct_loss,
-              correct_gain,
+              new_account_data
             }
-            new_account_data
+            _ -> []
           }
-          _ -> []
+        } else if datum is UtxoIntent{account, ..}: AccountDatum {
+          // we want to check that the number of continuing outputs checked
+          // matches the number we find in the outputs for immediate next user
+          when remaining_account_data is {
+            [Pair(owner, acc), ..rest] -> {
+              expect owner == account
+              list.push(
+                rest,
+                Pair(owner, OwnerAccumulator{..acc, num_continuing_outputs: acc.num_continuing_outputs - 1})
+              )
+            }
+            _ -> []
+          }
+        } else {
+          remaining_account_data
         }
       } else {
         remaining_account_data
@@ -351,36 +435,47 @@ fn validate_spends(
   True
 }
 
-validator account(
-  sequencer: KeyHash,
-  inbox: ScriptHash,
-  utxo_intent_script: ScriptHash
-) {
+validator account(sequencer: KeyHash) {
   mint(redeemer: IdMintRedeemer, own_policy_id: PolicyId, self: Transaction) -> Bool {
     let valid_account_output = fn(output: Output, self: Transaction) {
-      expect datum: AccountDatum = get_output_datum(output, self.datums)
-
-      let valid_owner = and {
-        blake2b_224(datum.verification_key) == datum.pub_key_hash,
-        list.has(self.extra_signatories, datum.pub_key_hash)
+      expect datum: AccountDatum = {
+        expect InlineDatum(datum) = output.datum
+        datum
       }
+      when datum is {
+        Account{verification_key, pub_key_hash, id, nonce} -> {
+          let valid_owner = and {
+            blake2b_224(verification_key) == pub_key_hash,
+            list.has(self.extra_signatories, pub_key_hash)
+          }
 
-      and{
-        valid_owner,
-        datum.nonce == 0
+          let valid_id = dict.to_pairs(assets.tokens(output.value, own_policy_id)) == [Pair(id, 1)]
+
+          and{
+            valid_owner,
+            valid_id,
+            nonce == 0
+          }
+        }
+        UtxoIntent{..} -> {
+          expect Some(withdraw_redeemer) = pairs.get_first(self.redeemers, Withdraw(Script(own_policy_id)))
+          expect SpendAccounts(_spends) = withdraw_redeemer
+          True
+        }
+        Inbox{..} -> True
       }
     }
     
     mint_own_id(redeemer, own_policy_id, self, valid_account_output)
   }
 
-  spend(_datum: Option<Data>, _redeemer: Data, own_input_ref: OutputReference, self: Transaction) -> Bool {
-    expect Some(own_input) = 
+  spend(_datum: Option<AccountDatum>, _redeemer: Data, own_input_ref: OutputReference, self: Transaction) -> Bool {
+    expect Some(own_input) =
       list.find(
         self.inputs,
         fn (input) { input.output_reference == own_input_ref }
       )
-
+    
     pairs.get_first(self.redeemers, Withdraw(own_input.output.address.payment_credential)) |> option.is_some
   }
 
@@ -389,7 +484,6 @@ validator account(
     when redeemer is {
       SyncAccounts ->
         validate_syncs(
-          Script(inbox),
           account,
           self.inputs,
           self.outputs,
@@ -398,16 +492,9 @@ validator account(
         validate_spends(
           spends,
           account,
-          utxo_intent_script,
           self.inputs,
           self.outputs,
         )
     }
-  }
-}
-
-validator inbox() {
-  spend(_datum: Option<InboxDatum>, _redeemer: Data, _own_input_ref: OutputReference, _self: Transaction) -> Bool {
-    True
   }
 }

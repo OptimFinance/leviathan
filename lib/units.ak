@@ -59,7 +59,7 @@ fn owner_assets_to_tree(
   )
 }
 
-fn fuzz_tokens(size: Int) -> Fuzzer<Pairs<AssetName, Int>> {
+pub fn fuzz_tokens(size: Int) -> Fuzzer<Pairs<AssetName, Int>> {
   let tokens <- fuzz.map(fuzz.list_between({
     let token_name, quantity <- fuzz.map2(
       fuzz.bytearray_between(0, 31),
@@ -70,7 +70,7 @@ fn fuzz_tokens(size: Int) -> Fuzzer<Pairs<AssetName, Int>> {
   list.indexed_map(tokens, fn (ix, Pair(name, quantity)) { Pair(bytearray.push(name, ix), quantity) })
 }
 
-fn fuzz_assets(size: Int) -> Fuzzer<Pairs<PolicyId, Pairs<AssetName, Int>>> {
+pub fn fuzz_assets(size: Int) -> Fuzzer<Pairs<PolicyId, Pairs<AssetName, Int>>> {
   let assets <- fuzz.map(fuzz.list_between({
     let policy_id, tokens <- fuzz.map2(
       fuzz.bytearray_fixed(27),
@@ -84,7 +84,7 @@ fn fuzz_assets(size: Int) -> Fuzzer<Pairs<PolicyId, Pairs<AssetName, Int>>> {
   )
 }
 
-fn fuzz_owner_assets(size: Int) -> Fuzzer<Dict<KeyHash, Value>> {
+pub fn fuzz_owner_assets(size: Int) -> Fuzzer<Dict<KeyHash, Value>> {
   let owner, result <- fuzz_eachl(
     fuzz.list_at_least(fuzz.bytearray(), size),
     dict.empty
