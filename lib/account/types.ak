@@ -48,7 +48,6 @@ pub type SignedIntent {
   signature: Signature
 }
 
-// ratio and continuing output index, or `None` for full
 pub type IntentRedeemer {
   NoncedIntent {
     intent: SignedIntent,
@@ -73,7 +72,6 @@ pub type SpendRedeemer {
 pub type AccountSpend {
   account: AssetName,
   intents: List<SpendRedeemer>,
-  outputs_start: Option<Int>,
 }
 
 pub type IdMintRedeemer {

@@ -23,7 +23,7 @@ pub fn valid_intent(
   }: SignedIntent,
   account_input: Input,
 ) {
-  expect Account{verification_key, ..}: AccountDatum = {
+  expect Account{id, verification_key, ..}: AccountDatum = {
     expect InlineDatum(datum) = account_input.output.datum
     datum
   }
@@ -35,12 +35,12 @@ pub fn valid_intent(
     let length = bytearray.length(payload)
     let header = if (length > 256) {
       bytearray.concat(#"59", bytearray.from_int_big_endian(length, 2))
-    } else if (length <= 16) {
+    } else if (length < 0x18) {
       bytearray.from_int_little_endian(0x40 + length, 1)
     } else {
       bytearray.concat(#"58", bytearray.from_int_big_endian(length, 1))
     }
-    header |> bytearray.concat(payload)
+    bytearray.concat(header, payload)
   }
   let message = 
     #"84" |> // `Sig_structure` is a list of 4 items
@@ -50,7 +50,10 @@ pub fn valid_intent(
     bytearray.concat(payload) |>
     if (hashed) { crypto.blake2b_224 } else { fn (x) {x} }
 
-  verify_ed25519_signature(verification_key, message, signature)?
+  and{
+    (intent.account == id)?,
+    verify_ed25519_signature(verification_key, message, signature)?,
+  }
 }
 
 test signature_valid() {
@@ -65,6 +68,10 @@ test signature_valid() {
     },
     partial: False
   }
+  trace(cbor.serialise(OutputReference {
+    transaction_id: #"0000000000000000000000000000000000000000000000000000000000000000",
+    output_index: 1,
+  }))
   trace(cbor.serialise(intent))
   valid_intent(
     SignedIntent {
