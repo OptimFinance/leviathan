@@ -41,6 +41,7 @@ use account/types.{
 }
 use account/utils.{mint_own_id}
 use account/intent.{valid_intent}
+use refactor.{validate_account_spends}
 
 type OwnerAccumulator {
   input: Option<Input>,
@@ -585,7 +586,7 @@ validator account(sequencer: KeyHash, sync_fee: Int) {
           self.mint
         ) 
       SpendAccounts(spends) -> {
-        validate_spends(
+        validate_account_spends(
           spends,
           account,
           self.inputs,

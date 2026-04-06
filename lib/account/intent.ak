@@ -7,6 +7,8 @@ use cardano/assets
 use account/types.{
   Account,
   AccountDatum,
+  AccountOutput,
+  AccountData,
   Intent,
   SignedIntent,
   SendIntent,
@@ -53,6 +55,45 @@ pub fn valid_intent(
   and{
     (intent.account == id)?,
     verify_ed25519_signature(verification_key, message, signature)?,
+  }
+}
+
+pub fn validate_signed_intent(
+  SignedIntent{
+    intent,
+    protected,
+    external_aad,
+    hashed,
+    indefinite_bytestring,
+    signature
+  }: SignedIntent,
+  AccountOutput{asset_name, data: AccountData{v_key, ..}, ..}: AccountOutput,
+) -> Bool {
+  let payload = if (indefinite_bytestring) {
+    serialise(serialise(intent))
+  } else {
+    let payload = serialise(intent)
+    let length = bytearray.length(payload)
+    let header = if (length > 256) {
+      bytearray.concat(#"59", bytearray.from_int_big_endian(length, 2))
+    } else if (length < 0x18) {
+      bytearray.from_int_little_endian(0x40 + length, 1)
+    } else {
+      bytearray.concat(#"58", bytearray.from_int_big_endian(length, 1))
+    }
+    header |> bytearray.concat(payload)
+  }
+  let message = 
+    #"84" |> // `Sig_structure` is a list of 4 items
+    bytearray.concat(#"6a5369676e617475726531") |> // @"Signature1"
+    bytearray.concat(protected) |> // protected headers map, just taken from the user
+    bytearray.concat(external_aad) |> // additional application data, should just be the empty bytestring
+    bytearray.concat(payload) |>
+    if (hashed) { crypto.blake2b_224 } else { fn (x) {x} }
+
+  and{
+    (intent.account == asset_name)?,
+    verify_ed25519_signature(v_key, message, signature)?,
   }
 }
 
