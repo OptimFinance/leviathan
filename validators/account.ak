@@ -596,4 +596,8 @@ validator account(sequencer: KeyHash, sync_fee: Int) {
       }
     }
   }
+
+  publish(_redeemer: Data, _certificate: Data, _self: Data) -> Bool {
+    True
+  }
 }

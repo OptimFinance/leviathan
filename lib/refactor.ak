@@ -1,3 +1,4 @@
+use aiken/cbor
 use account/intent.{validate_signed_intent}
 use account/types.{
   Account, AccountData, AccountDatum, AccountOutput, AccountSpend,
@@ -71,7 +72,7 @@ pub fn validate_account_spends(
                 input_account,
                 output_account,
                 account_spend,
-              )
+              )?
 
             let ((owner_acc_dict, mint_dict), rest_outputs) =
               validate_account_intents(
@@ -148,12 +149,11 @@ fn validate_account_in_out_spend(
   account_spend: AccountSpend,
 ) -> Bool {
   and {
-    input_account.policy_id == output_account.policy_id,
-    input_account.asset_name == output_account.asset_name,
-    input_account.data.v_key == output_account.data.v_key,
-    input_account.data.pub_key_hash == output_account.data.pub_key_hash,
-    input_account.asset_name == account_spend.account,
-    list.length(account_spend.intents) > 0,
+    (input_account.policy_id == output_account.policy_id)?,
+    (input_account.asset_name == output_account.asset_name)?,
+    (input_account.data.v_key == output_account.data.v_key)?,
+    (input_account.data.pub_key_hash == output_account.data.pub_key_hash)?,
+    (input_account.asset_name == account_spend.account)?,
   }
 }
 
