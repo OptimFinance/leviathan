@@ -523,7 +523,7 @@ fn validate_spends(
 }
 
 validator account(sequencer: KeyHash, sync_fee: Int) {
-  mint(redeemer: IdMintRedeemer, own_policy_id: PolicyId, self: Transaction) -> Bool {
+  mint(redeemer: Data, own_policy_id: PolicyId, self: Transaction) -> Bool {
     let valid_account_output = fn(output: Output, self: Transaction) {
       expect datum: AccountDatum = {
         expect InlineDatum(datum) = output.datum
@@ -552,10 +552,11 @@ validator account(sequencer: KeyHash, sync_fee: Int) {
 
     when withdraw_redeemer is {
       None -> {
+        expect mint_redeemer: IdMintRedeemer = redeemer
         // allow minting accounts as normal; should only be burnable during sync
-        expect MintId{..} = redeemer
+        expect MintId{..} = mint_redeemer
 
-        mint_own_id(redeemer, own_policy_id, self, valid_account_output)
+        mint_own_id(mint_redeemer, own_policy_id, self, valid_account_output)
       }
       // defer to withdraw, which should only allow minting/burning UtxoIntents
       // during Spend or burning accounts during Sync
