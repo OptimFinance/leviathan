@@ -1,10 +1,10 @@
-use aiken/cbor
 use account/intent.{validate_signed_intent}
 use account/types.{
-  Account, AccountData, AccountDatum, AccountOutput, AccountSpend,
-  AssetList, ExchangeIntent, Intent, IntentPayload, IntentSatisfaction, NoncedIntent,
+  Account, AccountData, AccountDatum, AccountOutput, AccountSpend, AssetList,
+  ExchangeIntent, Intent, IntentPayload, IntentSatisfaction, NoncedIntent,
   SendIntent, SpendRedeemer, SpentIntent, UtxoIntent,
 }
+use aiken/cbor
 use aiken/collection/dict.{Dict}
 use aiken/collection/list
 use aiken/option
@@ -360,141 +360,174 @@ fn validate_intent(
       account_asset_name == intent_account_asset_name,
     }
 
-  when payload is {
-    SendIntent { recipient, assets } -> {
-      expect None = mb_satisfaction
+  // If the satisfaction is 0 there must not be an input UtxoIntent, there must
+  // be a output UtxoIntent containing the full corresponding intent, but we
+  // don't want to change the Account at all.
+  when mb_satisfaction is {
+    Some(IntentSatisfaction { num: 0, .. }) -> {
+      expect None = mb_input_utxo_intent
 
-      let value = assets.from_asset_list(assets)
-      let owner_acc_dict =
-        dict.from_pairs(
-          [
-            Pair(
-              recipient,
-              OwnerAccumulator {
-                input: None,
-                output: None,
-                gain: value,
-                loss: assets.zero,
-              },
-            ),
-            Pair(
-              account_asset_name,
-              OwnerAccumulator {
-                input: None,
-                output: None,
-                gain: assets.zero,
-                loss: assets.add(value, "", "", fee),
-              },
-            ),
-          ],
-        )
-      (owner_acc_dict, dict.empty, outputs)
-    }
-    ExchangeIntent { offer, demand } -> {
-      let (num, denom) as satisfaction_tuple =
-        when mb_satisfaction is {
-          Some(IntentSatisfaction { num, denom }) -> {
-            expect and {
-                num >= 0,
-                num <= denom,
-                denom > 0,
-                or {
-                  partial,
-                  num == 0,
-                },
-              }
+      expect (Some(output_utxo_intent), rest_outputs) =
+        drop_maybe(outputs, output_to_utxo_intent(account_policy_id, _))
 
-            (num, denom)
-          }
-          None -> (1, 1)
+      expect and {
+          (output_utxo_intent.data.fee == fee)?,
+          (output_utxo_intent.data.payload == payload)?,
+          (output_utxo_intent.data.partial == partial)?,
+          option.is_none(output_utxo_intent.data.mb_nonce)?
         }
 
-      let complement = (denom - num, denom)
-      if num != denom {
-        let satisfied_demand =
-          assets.from_asset_list(scale(demand, satisfaction_tuple))
-        let satisfied_offer =
-          assets.from_asset_list(scale(offer, satisfaction_tuple))
-        let remaining_demand = scale(demand, complement)
-        let remaining_offer = scale(offer, complement)
+      let owner_acc_dict = dict.empty
 
-        expect (Some(output_utxo_intent), rest_outputs) =
-          drop_maybe(outputs, output_to_utxo_intent(account_policy_id, _))
+      let mint_dict =
+            dict.from_ascending_pairs(
+              [Pair(output_utxo_intent.asset_name, 1)],
+            )
 
-        let (is_output_intent_nft_valid, utxo_intent_mint_dict) =
-          mb_input_utxo_intent
-            |> option.map(
-                fn(input_utxo_intent) {
-                  (
-                    input_utxo_intent.asset_name == output_utxo_intent.asset_name,
-                    dict.empty,
-                  )
-                },
-              )
-            |> option.or_else(
-                (
-                  True,
-                  dict.from_ascending_pairs(
-                    [Pair(output_utxo_intent.asset_name, 1)],
-                  ),
-                ),
-              )
-
-        expect and {
-            is_output_intent_nft_valid,
-            output_utxo_intent.data.fee == fee,
-            output_utxo_intent.data.payload == ExchangeIntent {
-              offer: remaining_offer,
-              demand: remaining_demand,
-            },
-            output_utxo_intent.data.partial == partial,
-          }
-
-        let owner_acc_dict =
-          dict.from_ascending_pairs(
-            [
-              Pair(
-                account_asset_name,
-                OwnerAccumulator {
-                  input: None,
-                  output: None,
-                  gain: satisfied_demand,
-                  loss: assets.add(satisfied_offer, "", "", fee),
-                },
-              ),
-            ],
-          )
-        (owner_acc_dict, utxo_intent_mint_dict, rest_outputs)
-      } else {
-        let owner_acc_dict =
-          dict.from_ascending_pairs(
-            [
-              Pair(
-                account_asset_name,
-                OwnerAccumulator {
-                  input: None,
-                  output: None,
-                  gain: assets.from_asset_list(demand),
-                  loss: assets.add(assets.from_asset_list(offer), "", "", fee),
-                },
-              ),
-            ],
-          )
-
-        let utxo_intent_mint_dict =
-          mb_input_utxo_intent
-            |> option.map(
-                fn(input_utxo_intent) {
-                  dict.from_ascending_pairs(
-                    [Pair(input_utxo_intent.asset_name, -1)],
-                  )
-                },
-              )
-            |> option.or_else(dict.empty)
-
-        (owner_acc_dict, utxo_intent_mint_dict, outputs)
-      }
+      (owner_acc_dict, mint_dict, rest_outputs)
     }
+    _ ->
+      when payload is {
+        SendIntent { recipient, assets } -> {
+          expect None = mb_satisfaction
+
+          let value = assets.from_asset_list(assets)
+          let owner_acc_dict =
+            dict.from_pairs(
+              [
+                Pair(
+                  recipient,
+                  OwnerAccumulator {
+                    input: None,
+                    output: None,
+                    gain: value,
+                    loss: assets.zero,
+                  },
+                ),
+                Pair(
+                  account_asset_name,
+                  OwnerAccumulator {
+                    input: None,
+                    output: None,
+                    gain: assets.zero,
+                    loss: assets.add(value, "", "", fee),
+                  },
+                ),
+              ],
+            )
+          (owner_acc_dict, dict.empty, outputs)
+        }
+        ExchangeIntent { offer, demand } -> {
+          let (num, denom) as satisfaction_tuple =
+            when mb_satisfaction is {
+              Some(IntentSatisfaction { num, denom }) -> {
+                expect and {
+                    num >= 0,
+                    num <= denom,
+                    denom > 0,
+                    or {
+                      partial,
+                      num == 0,
+                    },
+                  }
+
+                (num, denom)
+              }
+              None -> (1, 1)
+            }
+
+          let complement = (denom - num, denom)
+          if num != denom {
+            let satisfied_demand =
+              assets.from_asset_list(scale(demand, satisfaction_tuple))
+            let satisfied_offer =
+              assets.from_asset_list(scale(offer, satisfaction_tuple))
+            let remaining_demand = scale(demand, complement)
+            let remaining_offer = scale(offer, complement)
+
+            expect (Some(output_utxo_intent), rest_outputs) =
+              drop_maybe(outputs, output_to_utxo_intent(account_policy_id, _))
+
+            let (is_output_intent_nft_valid, utxo_intent_mint_dict) =
+              mb_input_utxo_intent
+                |> option.map(
+                    fn(input_utxo_intent) {
+                      (
+                        input_utxo_intent.asset_name == output_utxo_intent.asset_name,
+                        dict.empty,
+                      )
+                    },
+                  )
+                |> option.or_else(
+                    (
+                      True,
+                      dict.from_ascending_pairs(
+                        [Pair(output_utxo_intent.asset_name, 1)],
+                      ),
+                    ),
+                  )
+
+            expect and {
+                is_output_intent_nft_valid,
+                output_utxo_intent.data.fee == fee,
+                output_utxo_intent.data.payload == ExchangeIntent {
+                  offer: remaining_offer,
+                  demand: remaining_demand,
+                },
+                output_utxo_intent.data.partial == partial,
+              }
+
+            let owner_acc_dict =
+              dict.from_ascending_pairs(
+                [
+                  Pair(
+                    account_asset_name,
+                    OwnerAccumulator {
+                      input: None,
+                      output: None,
+                      gain: satisfied_demand,
+                      loss: assets.add(satisfied_offer, "", "", fee),
+                    },
+                  ),
+                ],
+              )
+            (owner_acc_dict, utxo_intent_mint_dict, rest_outputs)
+          } else {
+            let owner_acc_dict =
+              dict.from_ascending_pairs(
+                [
+                  Pair(
+                    account_asset_name,
+                    OwnerAccumulator {
+                      input: None,
+                      output: None,
+                      gain: assets.from_asset_list(demand),
+                      loss: assets.add(
+                        assets.from_asset_list(offer),
+                        "",
+                        "",
+                        fee,
+                      ),
+                    },
+                  ),
+                ],
+              )
+
+            let utxo_intent_mint_dict =
+              mb_input_utxo_intent
+                |> option.map(
+                    fn(input_utxo_intent) {
+                      dict.from_ascending_pairs(
+                        [Pair(input_utxo_intent.asset_name, -1)],
+                      )
+                    },
+                  )
+                |> option.or_else(dict.empty)
+
+            (owner_acc_dict, utxo_intent_mint_dict, outputs)
+          }
+        }
+      }
   }
 }
 
@@ -532,16 +565,16 @@ pub fn merge_owner_accs(
 fn scale(assets: AssetList, (num, denom): (Int, Int)) {
   list.map(
     assets,
-    fn (Pair(policy_id, tokens)) {
+    fn(Pair(policy_id, tokens)) {
       Pair(
         policy_id,
         list.map(
           tokens,
-          fn (Pair(token_name, quantity)) {
+          fn(Pair(token_name, quantity)) {
             Pair(token_name, quantity * num / denom)
-          }
-        )
+          },
+        ),
       )
-    }
+    },
   )
 }
