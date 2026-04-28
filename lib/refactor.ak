@@ -4,7 +4,6 @@ use account/types.{
   ExchangeIntent, Intent, IntentPayload, IntentSatisfaction, NoncedIntent,
   SendIntent, SpendRedeemer, SpentIntent, UtxoIntent,
 }
-use aiken/cbor
 use aiken/collection/dict.{Dict}
 use aiken/collection/list
 use aiken/option
@@ -37,6 +36,8 @@ type UtxoIntentOutput {
 pub fn validate_account_spends(
   account_spends: List<AccountSpend>,
   account_script_cred: Credential,
+  fee_policy_id: PolicyId,
+  fee_asset_name: AssetName,
   inputs: List<Input>,
   outputs: List<Output>,
   mint: Value,
@@ -77,6 +78,8 @@ pub fn validate_account_spends(
             let ((owner_acc_dict, mint_dict), rest_outputs) =
               validate_account_intents(
                 account_script_hash,
+                fee_policy_id,
+                fee_asset_name,
                 input_account,
                 output_account,
                 account_spend.intents,
@@ -114,10 +117,12 @@ pub fn validate_account_spends(
           assets.reduce(
             delta,
             True,
-            fn(policy_id, asset_name, token_delta, acc) { acc && or {
+            fn(policy_id, asset_name, token_delta, acc) {
+              acc && or {
                 token_delta >= 0,
                 -token_delta <= assets.quantity_of(loss, policy_id, asset_name),
-              } },
+              }
+            },
           )
 
         let correct_gain =
@@ -125,21 +130,24 @@ pub fn validate_account_spends(
             gain,
             True,
             fn(policy_id, asset_name, expected_gain, acc) {
-              acc && assets.quantity_of(delta, policy_id, asset_name) >= expected_gain
+              acc && or {
+                expected_gain <= 0,
+                assets.quantity_of(delta, policy_id, asset_name) >= expected_gain
+              }
             },
           )
 
         and {
-          correct_loss,
-          correct_gain,
+          correct_loss?,
+          correct_gain?,
         }
       },
     )
 
   and {
-    list.length(owner_accs) > 0,
-    owner_accs_valid,
-    assets.tokens(mint, account_script_hash) == mint_dict,
+    (list.length(owner_accs) > 0)?,
+    owner_accs_valid?,
+    (assets.tokens(mint, account_script_hash) == mint_dict)?,
   }
 }
 
@@ -159,6 +167,8 @@ fn validate_account_in_out_spend(
 
 fn validate_account_intents(
   account_policy_id: PolicyId,
+  fee_policy_id: PolicyId,
+  fee_asset_name: AssetName,
   input_account: AccountOutput,
   output_account: AccountOutput,
   spend_redeemers: List<SpendRedeemer>,
@@ -219,8 +229,8 @@ fn validate_account_intents(
               (intent_data, None, nonce)
             }
 
-            SpentIntent { input_index } -> {
-              expect Some(input) = list.at(inputs, input_index)
+            SpentIntent { output_reference } -> {
+              expect Some(input) = list.find(inputs, fn (input) { input.output_reference == output_reference })
 
               expect Some(input_utxo_intent) =
                 output_to_utxo_intent(account_policy_id, input.output)
@@ -233,6 +243,8 @@ fn validate_account_intents(
           validate_intent(
             account_policy_id,
             input_account.asset_name,
+            fee_policy_id,
+            fee_asset_name,
             intent_data,
             mb_input_utxo_intent,
             mb_satisfaction,
@@ -307,7 +319,7 @@ fn output_to_utxo_intent(
     when output.datum is {
       InlineDatum(datum) ->
         if datum
-        is UtxoIntent { account: account_asset_name, fee, exchange, partial }: AccountDatum {
+        is UtxoIntent { id: account_asset_name, fee, exchange, partial }: AccountDatum {
           let data =
             IntentData {
               account_asset_name,
@@ -342,6 +354,8 @@ fn output_to_utxo_intent(
 fn validate_intent(
   account_policy_id: PolicyId,
   account_asset_name: AssetName,
+  fee_policy_id: PolicyId,
+  fee_asset_name: AssetName,
   intent_data: IntentData,
   mb_input_utxo_intent: Option<UtxoIntentOutput>,
   mb_satisfaction: Option<IntentSatisfaction>,
@@ -356,8 +370,8 @@ fn validate_intent(
   } = intent_data
 
   expect and {
-      fee >= 0,
-      account_asset_name == intent_account_asset_name,
+      (fee >= 0)?,
+      (account_asset_name == intent_account_asset_name)?,
     }
 
   // If the satisfaction is 0 there must not be an input UtxoIntent, there must
@@ -377,12 +391,23 @@ fn validate_intent(
           option.is_none(output_utxo_intent.data.mb_nonce)?
         }
 
-      let owner_acc_dict = dict.empty
+      let owner_acc_dict = dict.from_pairs(
+        [
+          Pair(
+            intent_account_asset_name,
+            OwnerAccumulator {
+              input: None,
+              output: None,
+              gain: assets.from_asset(fee_policy_id, fee_asset_name, -fee),
+              loss: assets.from_asset(fee_policy_id, fee_asset_name, fee)
+            }
+          )
+        ]
+      )
 
-      let mint_dict =
-            dict.from_ascending_pairs(
-              [Pair(output_utxo_intent.asset_name, 1)],
-            )
+      let mint_dict = dict.from_ascending_pairs(
+        [Pair(output_utxo_intent.asset_name, 1)],
+      )
 
       (owner_acc_dict, mint_dict, rest_outputs)
     }
@@ -410,7 +435,7 @@ fn validate_intent(
                     input: None,
                     output: None,
                     gain: assets.zero,
-                    loss: assets.add(value, "", "", fee),
+                    loss: assets.add(value, fee_policy_id, fee_asset_name, fee),
                   },
                 ),
               ],
@@ -485,8 +510,8 @@ fn validate_intent(
                     OwnerAccumulator {
                       input: None,
                       output: None,
-                      gain: satisfied_demand,
-                      loss: assets.add(satisfied_offer, "", "", fee),
+                      gain: assets.add(satisfied_demand, fee_policy_id, fee_asset_name, -fee),
+                      loss: assets.add(satisfied_offer, fee_policy_id, fee_asset_name, fee),
                     },
                   ),
                 ],
@@ -501,13 +526,8 @@ fn validate_intent(
                     OwnerAccumulator {
                       input: None,
                       output: None,
-                      gain: assets.from_asset_list(demand),
-                      loss: assets.add(
-                        assets.from_asset_list(offer),
-                        "",
-                        "",
-                        fee,
-                      ),
+                      gain: assets.add(assets.from_asset_list(demand), fee_policy_id, fee_asset_name, -fee),
+                      loss: assets.add(assets.from_asset_list(offer), fee_policy_id, fee_asset_name, fee),
                     },
                   ),
                 ],
