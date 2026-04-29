@@ -2,7 +2,6 @@ use aiken/collection/list
 use aiken/collection/pairs
 use aiken/collection/dict.{Dict}
 use aiken/crypto.{blake2b_224}
-use aiken/option
 use cardano/transaction.{
   Input,
   Output,
@@ -22,6 +21,7 @@ use account/types.{
   AccountDatum,
   Account,
   Inbox,
+  UtxoIntent,
   AccountRedeemer,
   IdMintRedeemer,
   MintId,
@@ -29,7 +29,7 @@ use account/types.{
   SyncAccounts,
   SpendAccounts,
 }
-use account/utils.{mint_own_id}
+use account/utils.{burn_own_id, mint_own_id}
 use refactor.{validate_account_spends}
 
 pub fn validate_sync(
@@ -72,12 +72,12 @@ pub fn validate_sync(
     dict.empty,
     fn (input, prev: Dict<ByteArray, Value>) {
       let owner = get_owner(input.output)
-      let value = assets.add(input.output.value, fee_policy_id, fee_asset_name, -sync_fee)
+      let value = input.output.value
       when owner is {
         Some(pkh) ->
           when dict.get(prev, pkh) is {
             Some(prev_entry) -> dict.insert(prev, pkh, assets.merge(prev_entry, value))
-            None -> dict.insert(prev, pkh, value)
+            None -> dict.insert(prev, pkh, assets.add(value, fee_policy_id, fee_asset_name, -sync_fee))
           }
         None -> prev
       }
@@ -197,14 +197,36 @@ validator account(
     }
   }
 
-  spend(_datum: Option<AccountDatum>, _redeemer: Data, own_input_ref: OutputReference, self: Transaction) -> Bool {
+  spend(datum: Option<AccountDatum>, _redeemer: Data, own_input_ref: OutputReference, self: Transaction) -> Bool {
     expect Some(own_input) =
       list.find(
         self.inputs,
         fn (input) { input.output_reference == own_input_ref }
       )
     
-    pairs.get_first(self.redeemers, Withdraw(own_input.output.address.payment_credential)) |> option.is_some
+    let withdraw_redeemer = pairs.get_first(self.redeemers, Withdraw(own_input.output.address.payment_credential))
+
+    when withdraw_redeemer is {
+      None -> {
+        when datum is {
+          None -> True
+          Some(Inbox{pub_key_hash, ..}) -> {
+            and{
+              list.has(self.extra_signatories, sequencer),
+              list.has(self.extra_signatories, pub_key_hash),
+            }
+          }
+          Some(UtxoIntent{..}) -> {
+            and{
+              list.has(self.extra_signatories, sequencer),
+              burn_own_id(own_input_ref, self)
+            }
+          }
+          _ -> False
+        }
+      }
+      Some(_) -> True
+    }
   }
 
   withdraw(redeemer: AccountRedeemer, account: Credential, self: Transaction) -> Bool {
