@@ -1,3 +1,4 @@
+use aiken/option
 use aiken/collection/list
 use aiken/collection/pairs
 use aiken/collection/dict.{Dict}
@@ -30,7 +31,7 @@ use account/types.{
   SpendAccounts,
 }
 use account/utils.{burn_own_id, mint_own_id}
-use refactor.{validate_account_spends}
+use refactor.{validate_account_spends, input_to_utxo_intent}
 
 pub fn validate_sync(
   sequencer: KeyHash,
@@ -186,10 +187,30 @@ validator account(
 
     when withdraw_redeemer is {
       None -> {
-        // allow minting accounts as normal; should only be burnable during sync
-        expect MintId{..} = redeemer
+        // There is another place where we allow burning and that is when
+        // spending UtxoIntents
+        let utxo_intent_burn_dict =
+          self.inputs
+            |> list.filter_map(_, fn (input) {
+              input_to_utxo_intent(own_policy_id, input)
+                |> option.map (fn (utxo_intent) {
+                  Pair(utxo_intent.asset_name, -1)
+                })
+            })
+            |> dict.from_pairs(_)
 
-        mint_own_id(redeemer, own_policy_id, self, valid_account_output)
+        let mint = assets.tokens(self.mint, own_policy_id)
+
+        // Either burn or or mint but not both...
+        // We can probably do both with `refactor.output_to_account`
+        if dict.is_empty(utxo_intent_burn_dict) {
+          // allow minting accounts as normal; should only be burnable during sync
+          expect MintId{..} = redeemer
+
+          mint_own_id(redeemer, own_policy_id, self, valid_account_output)?
+        } else {
+          (mint == utxo_intent_burn_dict)?
+        }
       }
       // defer to withdraw, which should only allow minting/burning UtxoIntents
       // during Spend or burning accounts during Sync

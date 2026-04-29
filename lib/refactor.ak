@@ -18,7 +18,7 @@ pub type OwnerAccumulator {
   loss: Value,
 }
 
-type IntentData {
+pub type IntentData {
   account_asset_name: AssetName,
   mb_nonce: Option<Int>,
   fee: Int,
@@ -26,7 +26,7 @@ type IntentData {
   partial: Bool,
 }
 
-type UtxoIntentOutput {
+pub type UtxoIntentOutput {
   policy_id: PolicyId,
   asset_name: AssetName,
   value: Value,
@@ -276,7 +276,7 @@ fn input_to_account(
   output_to_account(account_script_cred, account_policy_id, input.output)
 }
 
-fn output_to_account(
+pub fn output_to_account(
   account_script_cred: Credential,
   account_policy_id: PolicyId,
   output: Output,
@@ -311,7 +311,14 @@ fn output_to_account(
   }
 }
 
-fn output_to_utxo_intent(
+pub fn input_to_utxo_intent(
+  account_policy_id: PolicyId,
+  input: Input,
+) -> Option<UtxoIntentOutput> {
+  output_to_utxo_intent(account_policy_id, input.output)
+}
+
+pub fn output_to_utxo_intent(
   account_policy_id: PolicyId,
   output: Output,
 ) -> Option<UtxoIntentOutput> {
