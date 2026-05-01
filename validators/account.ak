@@ -120,7 +120,7 @@ pub fn validate_sync(
                 dict.insert(
                   out_value_map,
                   pub_key_hash,
-                  owner_value |> assets.add(account_script_hash, id, -1)
+                  owner_value |> assets.add(account_script_hash, id, 1)
                 ),
                 remaining_outputs
               )
