@@ -33,6 +33,13 @@ use account/types.{
 use account/utils.{burn_own_id, mint_own_id}
 use refactor.{validate_account_spends, input_to_utxo_intent}
 
+fn zip_pred(xs: List<a>, ys: List<b>, pred: fn (a, b) -> Bool) -> Bool {
+  when (xs, ys) is {
+    ([x, ..xs], [y, ..ys]) -> pred(x, y) && zip_pred(xs, ys, pred)
+    _ -> True
+  }
+}
+
 pub fn validate_sync(
   sequencer: KeyHash,
   fee_policy_id: PolicyId,
@@ -120,7 +127,7 @@ pub fn validate_sync(
                 dict.insert(
                   out_value_map,
                   pub_key_hash,
-                  owner_value |> assets.add(account_script_hash, id, -1)
+                  owner_value |> assets.add(account_script_hash, id, 1)
                 ),
                 remaining_outputs
               )
@@ -149,7 +156,26 @@ pub fn validate_sync(
     }
   )
 
-  in_value_map == out_value_map_with_burns
+
+  zip_pred(
+    dict.to_pairs(in_value_map),
+    dict.to_pairs(out_value_map_with_burns),
+    fn (Pair(owner_in, value_in), Pair(owner_out, value_out)) {
+      owner_in == owner_out && zip_pred(
+        dict.to_pairs(assets.to_dict(value_in)),
+        dict.to_pairs(assets.to_dict(value_out)),
+        fn (Pair(policy_id_in, tokens_in), Pair(policy_id_out, tokens_out)) {
+          policy_id_in == policy_id_out && zip_pred(
+            dict.to_pairs(tokens_in),
+            dict.to_pairs(tokens_out),
+            fn (Pair(asset_name_in, quantity_in), Pair(asset_name_out, quantity_out)) {
+              asset_name_in == asset_name_out && quantity_out >= quantity_in
+            }
+          )
+        }
+      )
+    }
+  )
 }
 
 validator account(
