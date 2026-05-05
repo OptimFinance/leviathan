@@ -99,7 +99,6 @@ pub type AccountDatum {
   }
 }
 
-
 pub type AccountRedeemer {
   SyncAccounts()
   SpendAccounts(List<AccountSpend>)

@@ -33,6 +33,11 @@ pub type UtxoIntentOutput {
   data: IntentData,
 }
 
+type RoundDirection {
+  RoundUp
+  RoundDown
+}
+
 pub fn validate_sync(
   sequencer: KeyHash,
   fee_policy_id: PolicyId,
@@ -419,8 +424,7 @@ pub fn output_to_account(
   if output.address.payment_credential == account_script_cred {
     when output.datum is {
       InlineDatum(datum) ->
-        if datum
-        is Account { id, verification_key, pub_key_hash, nonce }: AccountDatum {
+        if datum is Account { id, verification_key, pub_key_hash, nonce }: AccountDatum {
           let data =
             AccountData { v_key: verification_key, pub_key_hash, nonce }
           let value = output.value
@@ -436,6 +440,8 @@ pub fn output_to_account(
           } else {
             None
           }
+        } else if datum is Inbox{..}: AccountDatum {
+          fail "Inbox input not allowed during spend"
         } else {
           None
         }
@@ -460,8 +466,7 @@ pub fn output_to_utxo_intent(
   if output.address.payment_credential == Script(account_policy_id) {
     when output.datum is {
       InlineDatum(datum) ->
-        if datum
-        is UtxoIntent { id: account_asset_name, fee, exchange, partial }: AccountDatum {
+        if datum is UtxoIntent { id: account_asset_name, fee, exchange, partial }: AccountDatum {
           let data =
             IntentData {
               account_asset_name,
@@ -483,6 +488,8 @@ pub fn output_to_utxo_intent(
               )
             _ -> None
           }
+        } else if datum is Inbox{..}: AccountDatum {
+          fail "Inbox input not allowed during spend"
         } else {
           None
         }
@@ -600,12 +607,9 @@ fn validate_intent(
               None -> (1, 1)
             }
 
-          let complement = (denom - num, denom)
           if num != denom {
-            let satisfied_demand = assets.from_asset_list(scale(demand, satisfaction_tuple))
-            let satisfied_offer = assets.from_asset_list(scale(offer, satisfaction_tuple))
-            let remaining_demand = scale(demand, complement)
-            let remaining_offer = scale(offer, complement)
+            let (satisfied_demand, remaining_demand) = split(demand, satisfaction_tuple, RoundUp)
+            let (satisfied_offer, remaining_offer) = split(offer, satisfaction_tuple, RoundDown)
 
             expect (Some(output_utxo_intent), rest_outputs) =
               drop_maybe(outputs, output_to_utxo_intent(account_policy_id, _))
@@ -628,13 +632,13 @@ fn validate_intent(
                   )
 
             expect and {
-              is_output_intent_nft_valid,
-              output_utxo_intent.data.fee == fee,
-              output_utxo_intent.data.payload == ExchangeIntent {
+              is_output_intent_nft_valid?,
+              (output_utxo_intent.data.fee == fee)?,
+              (output_utxo_intent.data.payload == ExchangeIntent {
                 offer: remaining_offer,
                 demand: remaining_demand,
-              },
-              output_utxo_intent.data.partial == partial,
+              })?,
+              (output_utxo_intent.data.partial == partial)?,
             }
 
             let owner_acc_dict =
@@ -645,8 +649,8 @@ fn validate_intent(
                     OwnerAccumulator {
                       input: None,
                       output: None,
-                      gain: assets.add(satisfied_demand, fee_policy_id, fee_asset_name, -fee),
-                      loss: assets.add(satisfied_offer, fee_policy_id, fee_asset_name, fee),
+                      gain: assets.add(assets.from_asset_list(satisfied_demand), fee_policy_id, fee_asset_name, -fee),
+                      loss: assets.add(assets.from_asset_list(satisfied_offer), fee_policy_id, fee_asset_name, fee),
                     },
                   ),
                 ],
@@ -717,26 +721,45 @@ pub fn merge_owner_accs(
   )
 }
 
-fn scale(assets: AssetList, (num, denom): (Int, Int)) {
-  list.map(
+fn split(assets: AssetList, (num, denom): (Int, Int), round: RoundDirection) {
+  expect satisfied, remaining <- list.foldl2(
     assets,
-    fn(Pair(policy_id, tokens)) {
-      Pair(
-        policy_id,
-        list.map(
-          tokens,
-          fn(Pair(token_name, quantity)) {
-            Pair(token_name, quantity * num / denom)
-          },
-        ),
+    [],
+    [],
+    fn(Pair(policy_id, tokens), satisfied, remaining, return) {
+      expect satisfied_tokens, remaining_tokens <- list.foldl2(
+        tokens,
+        [],
+        [],
+        fn(Pair(token_name, quantity), satisfied_tokens, remaining_tokens, return) {
+          let satisfied = if (round == RoundDown) {
+              quantity * num / denom
+            } else {
+              ((quantity * num + denom - 1) / denom)
+            }
+
+          expect satisfied < quantity
+
+          return(
+            list.push(satisfied_tokens, Pair(token_name, satisfied)),
+            list.push(remaining_tokens, Pair(token_name, quantity - satisfied)),
+          )
+        },
+      )
+
+      return(
+        list.push(satisfied, Pair(policy_id, satisfied_tokens)),
+        list.push(remaining, Pair(policy_id, remaining_tokens))
       )
     },
   )
+  (satisfied, remaining)
 }
 
 fn zip_pred(xs: List<a>, ys: List<b>, pred: fn (a, b) -> Bool) -> Bool {
   when (xs, ys) is {
     ([x, ..xs], [y, ..ys]) -> pred(x, y) && zip_pred(xs, ys, pred)
-    _ -> True
+    ([], []) -> True
+    _ -> False
   }
 }

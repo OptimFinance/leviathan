@@ -110,17 +110,18 @@ validator account(
 
     when withdraw_redeemer is {
       None -> {
+        let sequencer_signed = list.has(self.extra_signatories, sequencer)
         when datum is {
-          None -> True
+          None -> sequencer_signed
           Some(Inbox{pub_key_hash, ..}) -> {
             and{
-              list.has(self.extra_signatories, sequencer),
+              sequencer_signed,
               list.has(self.extra_signatories, pub_key_hash),
             }
           }
           Some(UtxoIntent{..}) -> {
             and{
-              list.has(self.extra_signatories, sequencer),
+              sequencer_signed,
               burn_own_id(own_input_ref, self)
             }
           }
