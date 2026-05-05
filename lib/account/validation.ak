@@ -1,13 +1,13 @@
 use account/intent.{validate_signed_intent}
 use account/types.{
   Account, AccountData, AccountDatum, AccountOutput, AccountSpend, AssetList,
-  ExchangeIntent, Intent, IntentPayload, IntentSatisfaction, NoncedIntent,
-  SendIntent, SpendRedeemer, SpentIntent, UtxoIntent,
+  ExchangeIntent, Inbox, Intent, IntentPayload, IntentSatisfaction, KeyHash,
+  NoncedIntent, SendIntent, SpendRedeemer, SpentIntent, UtxoIntent
 }
 use aiken/collection/dict.{Dict}
 use aiken/collection/list
 use aiken/option
-use cardano/address.{Credential, Script}
+use cardano/address.{Credential, Script, VerificationKey}
 use cardano/assets.{AssetName, PolicyId, Value}
 use cardano/transaction.{InlineDatum, Input, Output}
 
@@ -33,6 +33,144 @@ pub type UtxoIntentOutput {
   data: IntentData,
 }
 
+pub fn validate_sync(
+  sequencer: KeyHash,
+  fee_policy_id: PolicyId,
+  fee_asset_name: AssetName,
+  sync_fee: Int,
+  account_script: Credential,
+  inputs: List<Input>,
+  outputs: List<Output>,
+  mint: Value,
+) -> Bool {
+  expect Script(account_script_hash) = account_script
+  let get_owner = fn(output: Output) {
+    let credential = output.address.payment_credential
+    
+    if credential == account_script {
+      expect InlineDatum(datum) = output.datum
+      if datum is Account{pub_key_hash, ..}: AccountDatum {
+        Some(pub_key_hash)
+      } else if datum is Inbox{pub_key_hash, ..}: AccountDatum {
+        Some(pub_key_hash)
+      } else {
+        None
+      }
+    } else {
+      when credential is {
+        VerificationKey(pkh) -> if pkh == sequencer {
+          None 
+        } else {
+          Some(pkh)
+        }
+        _ -> None
+      }
+    }
+  }
+
+  let in_value_map: Dict<ByteArray, Value> = list.foldl(
+    inputs,
+    dict.empty,
+    fn (input, prev: Dict<ByteArray, Value>) {
+      let owner = get_owner(input.output)
+      let value = input.output.value
+      when owner is {
+        Some(pkh) ->
+          when dict.get(prev, pkh) is {
+            Some(prev_entry) -> dict.insert(prev, pkh, assets.merge(prev_entry, value))
+            None -> dict.insert(prev, pkh, assets.add(value, fee_policy_id, fee_asset_name, -sync_fee))
+          }
+        None -> prev
+      }
+    }
+  )
+
+  let out_value_map = list.foldl(
+    outputs,
+    dict.empty,
+    fn (output, prev) {
+      let owner = get_owner(output)
+      when owner is {
+        Some(pkh) ->
+          when dict.get(prev, pkh) is {
+            Some(prev_entry) -> dict.insert(prev, pkh, assets.merge(prev_entry, output.value))
+            None -> dict.insert(prev, pkh, output.value)
+          }
+        None -> prev
+      }
+    }
+  )
+
+  let account_mints = assets.tokens(mint, account_script_hash)
+
+  expect list.all(dict.values(account_mints), fn (value) { value == -1 })
+
+  expect out_value_map_with_burns, _remaining_outputs <- list.foldl2(
+    inputs,
+    out_value_map,
+    outputs,
+    fn (input, out_value_map, remaining_outputs, return) {
+      if input.output.address.payment_credential == account_script {
+        expect InlineDatum(datum) = input.output.datum
+        if datum is Account{id, pub_key_hash, ..}: AccountDatum {
+          when dict.get(account_mints, id) is {
+            Some(-1)  -> {
+              expect Some(owner_value) = dict.get(out_value_map, pub_key_hash) 
+              return(
+                dict.insert(
+                  out_value_map,
+                  pub_key_hash,
+                  owner_value |> assets.add(account_script_hash, id, 1)
+                ),
+                remaining_outputs
+              )
+            }
+            None -> {
+              expect [output, ..new_remaining_outputs] = list.drop_while(
+                remaining_outputs,
+                fn (output) { output.address.payment_credential != account_script }
+              )
+
+              expect and {
+                output.datum == input.output.datum,
+                dict.to_pairs(assets.tokens(output.value, account_script_hash)) == [Pair(id, 1)]
+              }
+
+              return(out_value_map, new_remaining_outputs)
+            }
+            _ -> fail "Only burning accounts is permitted during sync (also impossible)"
+          }
+        } else {
+          return(out_value_map, remaining_outputs)
+        }
+      } else {
+        return(out_value_map, remaining_outputs)
+      }
+    }
+  )
+
+
+  zip_pred(
+    dict.to_pairs(in_value_map),
+    dict.to_pairs(out_value_map_with_burns),
+    fn (Pair(owner_in, value_in), Pair(owner_out, value_out)) {
+      owner_in == owner_out && zip_pred(
+        dict.to_pairs(assets.to_dict(value_in)),
+        dict.to_pairs(assets.to_dict(value_out)),
+        fn (Pair(policy_id_in, tokens_in), Pair(policy_id_out, tokens_out)) {
+          policy_id_in == policy_id_out && zip_pred(
+            dict.to_pairs(tokens_in),
+            dict.to_pairs(tokens_out),
+            fn (Pair(asset_name_in, quantity_in), Pair(asset_name_out, quantity_out)) {
+              asset_name_in == asset_name_out && quantity_out >= quantity_in
+            }
+          )
+        }
+      )
+    }
+  )
+}
+
 pub fn validate_account_spends(
   account_spends: List<AccountSpend>,
   account_script_cred: Credential,
@@ -55,8 +193,7 @@ pub fn validate_account_spends(
         (account_spends, outputs) as rests,
         return,
       ) {
-        let mb_account =
-          input_to_account(account_script_cred, account_script_hash, input)
+        let mb_account = input_to_account(account_script_cred, account_script_hash, input)
 
         when mb_account is {
           Some(input_account) -> {
@@ -212,8 +349,7 @@ fn validate_account_intents(
             NoncedIntent { intent: signed_intent } -> {
               expect validate_signed_intent(signed_intent, input_account)
 
-              let Intent { account, nonce, fee, payload, partial } =
-                signed_intent.intent
+              let Intent { account, nonce, fee, payload, partial } = signed_intent.intent
 
               let intent_data =
                 IntentData {
@@ -232,8 +368,7 @@ fn validate_account_intents(
             SpentIntent { output_reference } -> {
               expect Some(input) = list.find(inputs, fn (input) { input.output_reference == output_reference })
 
-              expect Some(input_utxo_intent) =
-                output_to_utxo_intent(account_policy_id, input.output)
+              expect Some(input_utxo_intent) = output_to_utxo_intent(account_policy_id, input.output)
 
               (input_utxo_intent.data, Some(input_utxo_intent), prev_nonce)
             }
@@ -263,7 +398,7 @@ fn validate_account_intents(
       fn(a, b) { (a, b) },
     )
 
-  expect output_account.data.nonce > max_nonce
+  expect output_account.data.nonce == max_nonce + 1
 
   ((a, b), rests)
 }
@@ -454,13 +589,10 @@ fn validate_intent(
             when mb_satisfaction is {
               Some(IntentSatisfaction { num, denom }) -> {
                 expect and {
-                    num >= 0,
-                    num <= denom,
-                    denom > 0,
-                    or {
-                      partial,
-                      num == 0,
-                    },
+                    (num >= 0)?,
+                    (num <= denom)?,
+                    (denom > 0)?,
+                    partial?,
                   }
 
                 (num, denom)
@@ -470,10 +602,8 @@ fn validate_intent(
 
           let complement = (denom - num, denom)
           if num != denom {
-            let satisfied_demand =
-              assets.from_asset_list(scale(demand, satisfaction_tuple))
-            let satisfied_offer =
-              assets.from_asset_list(scale(offer, satisfaction_tuple))
+            let satisfied_demand = assets.from_asset_list(scale(demand, satisfaction_tuple))
+            let satisfied_offer = assets.from_asset_list(scale(offer, satisfaction_tuple))
             let remaining_demand = scale(demand, complement)
             let remaining_offer = scale(offer, complement)
 
@@ -493,21 +623,19 @@ fn validate_intent(
                 |> option.or_else(
                     (
                       True,
-                      dict.from_ascending_pairs(
-                        [Pair(output_utxo_intent.asset_name, 1)],
-                      ),
+                      dict.from_ascending_pairs([Pair(output_utxo_intent.asset_name, 1)]),
                     ),
                   )
 
             expect and {
-                is_output_intent_nft_valid,
-                output_utxo_intent.data.fee == fee,
-                output_utxo_intent.data.payload == ExchangeIntent {
-                  offer: remaining_offer,
-                  demand: remaining_demand,
-                },
-                output_utxo_intent.data.partial == partial,
-              }
+              is_output_intent_nft_valid,
+              output_utxo_intent.data.fee == fee,
+              output_utxo_intent.data.payload == ExchangeIntent {
+                offer: remaining_offer,
+                demand: remaining_demand,
+              },
+              output_utxo_intent.data.partial == partial,
+            }
 
             let owner_acc_dict =
               dict.from_ascending_pairs(
@@ -604,4 +732,11 @@ fn scale(assets: AssetList, (num, denom): (Int, Int)) {
       )
     },
   )
+}
+
+fn zip_pred(xs: List<a>, ys: List<b>, pred: fn (a, b) -> Bool) -> Bool {
+  when (xs, ys) is {
+    ([x, ..xs], [y, ..ys]) -> pred(x, y) && zip_pred(xs, ys, pred)
+    _ -> True
+  }
 }

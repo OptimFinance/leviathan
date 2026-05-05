@@ -1,7 +1,7 @@
 use aiken/option
 use aiken/collection/list
 use aiken/collection/pairs
-use aiken/collection/dict.{Dict}
+use aiken/collection/dict
 use aiken/crypto.{blake2b_224}
 use cardano/transaction.{
   Input,
@@ -15,9 +15,9 @@ use cardano/address.{
   Address,
   Credential,
   Script,
-  VerificationKey,
+  
 }
-use cardano/assets.{AssetName, PolicyId, Value}
+use cardano/assets.{ PolicyId, }
 use account/types.{
   AccountDatum,
   Account,
@@ -31,152 +31,7 @@ use account/types.{
   SpendAccounts,
 }
 use account/utils.{burn_own_id, mint_own_id}
-use refactor.{validate_account_spends, input_to_utxo_intent}
-
-fn zip_pred(xs: List<a>, ys: List<b>, pred: fn (a, b) -> Bool) -> Bool {
-  when (xs, ys) is {
-    ([x, ..xs], [y, ..ys]) -> pred(x, y) && zip_pred(xs, ys, pred)
-    _ -> True
-  }
-}
-
-pub fn validate_sync(
-  sequencer: KeyHash,
-  fee_policy_id: PolicyId,
-  fee_asset_name: AssetName,
-  sync_fee: Int,
-  account_script: Credential,
-  inputs: List<Input>,
-  outputs: List<Output>,
-  mint: Value,
-) -> Bool {
-  expect Script(account_script_hash) = account_script
-  let get_owner = fn(output: Output) {
-    let credential = output.address.payment_credential
-    
-    if credential == account_script {
-      expect InlineDatum(datum) = output.datum
-      if datum is Account{pub_key_hash, ..}: AccountDatum {
-        Some(pub_key_hash)
-      } else if datum is Inbox{pub_key_hash, ..}: AccountDatum {
-        Some(pub_key_hash)
-      } else {
-        None
-      }
-    } else {
-      when credential is {
-        VerificationKey(pkh) -> if pkh == sequencer {
-          None 
-        } else {
-          Some(pkh)
-        }
-        _ -> None
-      }
-    }
-  }
-
-  let in_value_map: Dict<ByteArray, Value> = list.foldl(
-    inputs,
-    dict.empty,
-    fn (input, prev: Dict<ByteArray, Value>) {
-      let owner = get_owner(input.output)
-      let value = input.output.value
-      when owner is {
-        Some(pkh) ->
-          when dict.get(prev, pkh) is {
-            Some(prev_entry) -> dict.insert(prev, pkh, assets.merge(prev_entry, value))
-            None -> dict.insert(prev, pkh, assets.add(value, fee_policy_id, fee_asset_name, -sync_fee))
-          }
-        None -> prev
-      }
-    }
-  )
-
-  let out_value_map = list.foldl(
-    outputs,
-    dict.empty,
-    fn (output, prev) {
-      let owner = get_owner(output)
-      when owner is {
-        Some(pkh) ->
-          when dict.get(prev, pkh) is {
-            Some(prev_entry) -> dict.insert(prev, pkh, assets.merge(prev_entry, output.value))
-            None -> dict.insert(prev, pkh, output.value)
-          }
-        None -> prev
-      }
-    }
-  )
-
-  let account_mints = assets.tokens(mint, account_script_hash)
-
-  expect list.all(dict.values(account_mints), fn (value) { value == -1 })
-
-  expect out_value_map_with_burns, _remaining_outputs <- list.foldl2(
-    inputs,
-    out_value_map,
-    outputs,
-    fn (input, out_value_map, remaining_outputs, return) {
-      if input.output.address.payment_credential == account_script {
-        expect InlineDatum(datum) = input.output.datum
-        if datum is Account{id, pub_key_hash, ..}: AccountDatum {
-          when dict.get(account_mints, id) is {
-            Some(-1)  -> {
-              expect Some(owner_value) = dict.get(out_value_map, pub_key_hash) 
-              return(
-                dict.insert(
-                  out_value_map,
-                  pub_key_hash,
-                  owner_value |> assets.add(account_script_hash, id, 1)
-                ),
-                remaining_outputs
-              )
-            }
-            None -> {
-              expect [output, ..new_remaining_outputs] = list.drop_while(
-                remaining_outputs,
-                fn (output) { output.address.payment_credential != account_script }
-              )
-
-              expect and {
-                output.datum == input.output.datum,
-                dict.to_pairs(assets.tokens(output.value, account_script_hash)) == [Pair(id, 1)]
-              }
-
-              return(out_value_map, new_remaining_outputs)
-            }
-            _ -> fail "Only burning accounts is permitted during sync (also impossible)"
-          }
-        } else {
-          return(out_value_map, remaining_outputs)
-        }
-      } else {
-        return(out_value_map, remaining_outputs)
-      }
-    }
-  )
-
-
-  zip_pred(
-    dict.to_pairs(in_value_map),
-    dict.to_pairs(out_value_map_with_burns),
-    fn (Pair(owner_in, value_in), Pair(owner_out, value_out)) {
-      owner_in == owner_out && zip_pred(
-        dict.to_pairs(assets.to_dict(value_in)),
-        dict.to_pairs(assets.to_dict(value_out)),
-        fn (Pair(policy_id_in, tokens_in), Pair(policy_id_out, tokens_out)) {
-          policy_id_in == policy_id_out && zip_pred(
-            dict.to_pairs(tokens_in),
-            dict.to_pairs(tokens_out),
-            fn (Pair(asset_name_in, quantity_in), Pair(asset_name_out, quantity_out)) {
-              asset_name_in == asset_name_out && quantity_out >= quantity_in
-            }
-          )
-        }
-      )
-    }
-  )
-}
+use account/validation.{validate_sync, validate_account_spends, input_to_utxo_intent}
 
 validator account(
   sequencer: KeyHash,
@@ -228,7 +83,7 @@ validator account(
         let mint = assets.tokens(self.mint, own_policy_id)
 
         // Either burn or or mint but not both...
-        // We can probably do both with `refactor.output_to_account`
+        // We can probably do both with `validation.output_to_account`
         if dict.is_empty(utxo_intent_burn_dict) {
           // allow minting accounts as normal; should only be burnable during sync
           expect MintId{..} = redeemer
