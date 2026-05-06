@@ -14,48 +14,24 @@ use account/types.{
   SendIntent,
 }
 
-pub fn valid_intent(
-  SignedIntent{
-    intent,
-    protected,
-    external_aad,
-    hashed,
-    indefinite_bytestring,
-    signature
-  }: SignedIntent,
-  account_input: Input,
-) {
-  expect Account{id, verification_key, ..}: AccountDatum = {
+pub fn valid_intent(intent: SignedIntent, account_input: Input) {
+  expect Account{id, verification_key, pub_key_hash, nonce}: AccountDatum = {
     expect InlineDatum(datum) = account_input.output.datum
     datum
   }
 
-  let payload = if (indefinite_bytestring) {
-    serialise(serialise(intent))
-  } else {
-    let payload = serialise(intent)
-    let length = bytearray.length(payload)
-    let header = if (length > 255) {
-      bytearray.concat(#"59", bytearray.from_int_big_endian(length, 2))
-    } else if (length < 0x18) {
-      bytearray.from_int_little_endian(0x40 + length, 1)
-    } else {
-      bytearray.concat(#"58", bytearray.from_int_big_endian(length, 1))
+  validate_signed_intent(
+  intent,
+  AccountOutput {
+    policy_id: "",
+    value: assets.zero,
+    asset_name: id,
+    data: AccountData{
+      v_key: verification_key,
+      pub_key_hash: pub_key_hash,
+      nonce,
     }
-    bytearray.concat(header, payload)
-  }
-  let message = 
-    #"84" |> // `Sig_structure` is a list of 4 items
-    bytearray.concat(#"6a5369676e617475726531") |> // @"Signature1"
-    bytearray.concat(protected) |> // protected headers map, just taken from the user
-    bytearray.concat(external_aad) |> // additional application data, should just be the empty bytestring
-    bytearray.concat(payload) |>
-    if (hashed) { crypto.blake2b_224 } else { fn (x) {x} }
-
-  and{
-    (intent.account == id)?,
-    verify_ed25519_signature(verification_key, message, signature)?,
-  }
+  })
 }
 
 pub fn validate_signed_intent(
@@ -72,9 +48,9 @@ pub fn validate_signed_intent(
   let payload = if (indefinite_bytestring) {
     serialise(serialise(intent))
   } else {
-    let payload = serialise(intent)
+    let payload = serialise(intent) |> if (hashed) { crypto.blake2b_224 } else { fn (x) {x} }
     let length = bytearray.length(payload)
-    let header = if (length > 256) {
+    let header = if (length > 255) {
       bytearray.concat(#"59", bytearray.from_int_big_endian(length, 2))
     } else if (length < 0x18) {
       bytearray.from_int_little_endian(0x40 + length, 1)
@@ -88,8 +64,7 @@ pub fn validate_signed_intent(
     bytearray.concat(#"6a5369676e617475726531") |> // @"Signature1"
     bytearray.concat(protected) |> // protected headers map, just taken from the user
     bytearray.concat(external_aad) |> // additional application data, should just be the empty bytestring
-    bytearray.concat(payload) |>
-    if (hashed) { crypto.blake2b_224 } else { fn (x) {x} }
+    bytearray.concat(payload)
 
   and{
     (intent.account == asset_name)?,
@@ -100,28 +75,27 @@ pub fn validate_signed_intent(
 test signature_valid() {
   let account_script = #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
   let intent = Intent {
-    account: "",
-    nonce: 0,
-    fee: 0,
+    account: #"ea13d307d664c79dd908ac040ccff8cfab79b1d99740b249db6df0a7d0686abe",
+    nonce: 2,
+    fee: 1500000,
     payload: SendIntent {
-      recipient: "",
-      assets: []
+      recipient: #"9604ff3c3c7b3d905c3b1dac703b0f91a7047298881b22684573c688b3862159",
+      assets: [
+        Pair(#"3773a3d5baf127126cc4d473d968c683ebc0845cc4554cbf6e48d371",
+          [Pair(#"744f414441", 5000000)]
+        )
+      ]
     },
     partial: False
   }
-  trace(cbor.serialise(OutputReference {
-    transaction_id: #"0000000000000000000000000000000000000000000000000000000000000000",
-    output_index: 1,
-  }))
-  trace(cbor.serialise(intent))
   valid_intent(
     SignedIntent {
       intent,
-      protected: #"582aa201276761646472657373581d612042e66ff84b5b5cbfc64cc769682eb9ea55ec8a186c2fbe49c8dc72",
+      protected: #"5846a201276761646472657373583900bfef37929d1741059cb84e83a7869ffa6c9a9728b3da0421de904eff8f4eab9afe5eeb29c8ab65a26824487ed037ccf9ad9ce12e90e29508",
       external_aad: #"40",
-      hashed: False,
+      hashed: True,
       indefinite_bytestring: False,
-      signature: #"4ea96350e1ff28f3b049673f1d0a0c9520a36f5d6e838f56de2f148bd328a9f6898958ca80c02d7c0c5d1e49b7eca2a5c21008983a2e0813fc8cc593aad5b80f"
+      signature: #"62de9e570875b4e88dbd4a752e2c3bcf2f79876bea6524034dcfadd2a8785f5fe923b51e9e7ae904e14f144205c83e4b94c12ccddc1e96e100068d5b02b90706"
     },
     Input {
       output_reference: OutputReference {
@@ -135,9 +109,9 @@ test signature_valid() {
         },
         value: assets.from_asset_list([Pair(account_script, [Pair("", 1)])]),
         datum: InlineDatum(Account {
-          id: "",
-          pub_key_hash: #"2042e66ff84b5b5cbfc64cc769682eb9ea55ec8a186c2fbe49c8dc72",
-          verification_key: #"c1732fa372ce6dcea07a0ff842a1988bc5989faba463bca5aee3d5473e35c089",
+          id: #"ea13d307d664c79dd908ac040ccff8cfab79b1d99740b249db6df0a7d0686abe",
+          pub_key_hash: #"bfef37929d1741059cb84e83a7869ffa6c9a9728b3da0421de904eff",
+          verification_key: #"a3c6736375528a46c9d9b0fcff59f355ec8eba04021b3cbffbf89db2a2657aba",
           nonce: 0,
         }),
         reference_script: None,
