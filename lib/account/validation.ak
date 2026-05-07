@@ -547,8 +547,8 @@ fn validate_intent(
             OwnerAccumulator {
               input: None,
               output: None,
-              gain: assets.from_asset(fee_policy_id, fee_asset_name, -fee),
-              loss: assets.from_asset(fee_policy_id, fee_asset_name, fee)
+              gain: assets.zero,
+              loss: assets.zero,
             }
           )
         ]
@@ -631,9 +631,10 @@ fn validate_intent(
                     ),
                   )
 
+            let partial_fee = num * fee / denom
             expect and {
               is_output_intent_nft_valid?,
-              (output_utxo_intent.data.fee == fee)?,
+              (output_utxo_intent.data.fee == fee - partial_fee)?,
               (output_utxo_intent.data.payload == ExchangeIntent {
                 offer: remaining_offer,
                 demand: remaining_demand,
@@ -649,8 +650,8 @@ fn validate_intent(
                     OwnerAccumulator {
                       input: None,
                       output: None,
-                      gain: assets.add(assets.from_asset_list(satisfied_demand), fee_policy_id, fee_asset_name, -fee),
-                      loss: assets.add(assets.from_asset_list(satisfied_offer), fee_policy_id, fee_asset_name, fee),
+                      gain: assets.add(assets.from_asset_list(satisfied_demand), fee_policy_id, fee_asset_name, -partial_fee),
+                      loss: assets.add(assets.from_asset_list(satisfied_offer), fee_policy_id, fee_asset_name, partial_fee),
                     },
                   ),
                 ],
