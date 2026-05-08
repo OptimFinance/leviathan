@@ -53,11 +53,13 @@ validator account(
           }
 
           let valid_id = dict.to_pairs(assets.tokens(output.value, own_policy_id)) == [Pair(id, 1)]
+          let minimum_fee = assets.quantity_of(output.value, fee_policy_id, fee_asset_name) >= sync_fee
 
           and{
             valid_owner,
             valid_id,
-            nonce == 0
+            nonce == 0,
+            minimum_fee
           }
         }
         _ -> False
