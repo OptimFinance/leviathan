@@ -13,7 +13,7 @@ use account/types.{
   AccountRedeemer,
   AccountSpend,
   ExchangeIntent,
-  NoncedIntent,
+  IntentPayload, IntentSatisfaction, NoncedIntent,
   ScriptHash,
   SpendAccounts,
   SpendRedeemer,
@@ -69,7 +69,6 @@ fn verify_claim(output: Output, claim: Claim) -> Bool {
       (dict.to_pairs(assets.tokens(output_value, own_policy_id)) == [Pair(distribution_id, 1)])?,
       (list.length(path) == depth)?,
       has_expected_amount?,
-      //(reward_amount == expected_amount)?, // why is this here and commented out?
       (verify_leaf(reward, root_hash, path))?,
     ],
   )
@@ -121,6 +120,29 @@ pub fn validate_cancel(
     list.any(outputs, fn (output) {
       output.address == distributor && output.value == own_input.value
     })
+  }
+}
+
+pub fn get_reward_intent(
+  intent_redeemers: List<SpendRedeemer>,
+  inputs: List<Input>,
+) -> Option<IntentPayload> {
+  when intent_redeemers is {
+    [SpendRedeemer{ redeemer: NoncedIntent{intent}, satisfaction: None }] -> {
+      Some(intent.intent.payload)
+    }
+    [SpendRedeemer{ redeemer: SpentIntent{output_reference}, satisfaction: None }] -> {
+      expect Some(intent_input) = list.find(inputs, fn (input) { input.output_reference == output_reference })
+      expect UtxoIntent{exchange, ..}: AccountDatum = {
+        expect InlineDatum(datum) = intent_input.output.datum
+        datum
+      }
+      Some(exchange)
+    }
+    [SpendRedeemer{ redeemer: NoncedIntent{..}, satisfaction: Some(IntentSatisfaction { num: 0, denom: 0 }) }, ..rest] -> {
+      get_reward_intent(rest, inputs)
+    }
+    _ -> None
   }
 }
 
@@ -180,20 +202,7 @@ pub fn validate_claim(
           False
         }
       })
-      expect Some(ExchangeIntent{offer, demand}) = when spend.intents is {
-        [SpendRedeemer{ redeemer: NoncedIntent{intent}, satisfaction: None }] -> {
-          Some(intent.intent.payload)
-        }
-        [SpendRedeemer{ redeemer: SpentIntent{output_reference}, satisfaction: None }] -> {
-          expect Some(intent_input) = list.find(inputs, fn (input) { input.output_reference == output_reference })
-          expect UtxoIntent{exchange, ..}: AccountDatum = {
-            expect InlineDatum(datum) = intent_input.output.datum
-            datum
-          }
-          Some(exchange)
-        }
-        _ -> None
-      }
+      expect Some(ExchangeIntent{offer, demand}) = get_reward_intent(spend.intents, inputs)
       let intent_correct = and{
         (offer == [])?,
         (demand == [Pair(reward_policy_id, [Pair(reward_asset_name, reward.amount)])])?
