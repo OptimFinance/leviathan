@@ -19,7 +19,7 @@ validator distribution(
   sequencer: KeyHash,
   account_script: ScriptHash,
 ) {
-  mint(own_policy_id: PolicyId, redeemers: List<MintDistributionRedeemer>, self: Transaction) -> Bool {
+  mint(redeemers: List<MintDistributionRedeemer>, own_policy_id: PolicyId, self: Transaction) -> Bool {
     expect VerificationKey(distributor_pkh) = distributor.payment_credential
     list.has(self.extra_signatories, distributor_pkh)?
       && validate_mint(redeemers, self.outputs, self.mint, own_policy_id)?

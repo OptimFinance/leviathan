@@ -1,7 +1,8 @@
-//use aiken/cbor
+use aiken/cbor
 use aiken/collection/dict
 use aiken/collection/list
 use aiken/collection/pairs
+use aiken/option
 use cardano/transaction.{InlineDatum, Input, Output, ScriptPurpose, Withdraw, find_script_outputs}
 use cardano/address.{Address, Script}
 use cardano/assets.{Value, AssetName, PolicyId, ada_policy_id}
@@ -18,7 +19,9 @@ use account/types.{
   SpendAccounts,
   SpendRedeemer,
   SpentIntent,
-  UtxoIntent
+  UtxoIntent,
+  AssetList,
+  IntentPayload,
 } as account_types
 
 use distribution/merkle.{remove_leaf, verify_leaf}
@@ -180,24 +183,10 @@ pub fn validate_claim(
           False
         }
       })
-      expect Some(ExchangeIntent{offer, demand}) = when spend.intents is {
-        [SpendRedeemer{ redeemer: NoncedIntent{intent}, satisfaction: None }] -> {
-          Some(intent.intent.payload)
-        }
-        [SpendRedeemer{ redeemer: SpentIntent{output_reference}, satisfaction: None }] -> {
-          expect Some(intent_input) = list.find(inputs, fn (input) { input.output_reference == output_reference })
-          expect UtxoIntent{exchange, ..}: AccountDatum = {
-            expect InlineDatum(datum) = intent_input.output.datum
-            datum
-          }
-          Some(exchange)
-        }
-        _ -> None
-      }
-      let intent_correct = and{
-        (offer == [])?,
-        (demand == [Pair(reward_policy_id, [Pair(reward_asset_name, reward.amount)])])?
-      }
+      trace cbor.diagnostic(spend.intents)
+      expect [claim_assets] = list.filter_map(spend.intents, parse_claim_assets(inputs, _))
+
+      let intent_correct = claim_assets == [Pair(reward_policy_id, [Pair(reward_asset_name, reward.amount)])]
 
       and{
         verify_claim(own_input, claim),
@@ -207,5 +196,41 @@ pub fn validate_claim(
       }
     }
     _ -> False
+  }
+}
+
+fn parse_claim_assets(inputs: List<Input>, spendRedeemer: SpendRedeemer) -> Option<AssetList> {
+  let SpendRedeemer{redeemer, satisfaction} = spendRedeemer
+  when satisfaction is {
+    None -> {
+      when redeemer is {
+        NoncedIntent{intent} -> {
+          intent_payload_to_claim_assets(intent.intent.payload)
+        }
+        SpentIntent{output_reference} -> {
+          inputs
+            |> list.find(fn (input) { input.output_reference == output_reference })
+            |> option.and_then(fn (input) {
+              expect InlineDatum(datum) = input.output.datum
+              if datum is UtxoIntent{exchange, ..}: AccountDatum {
+                intent_payload_to_claim_assets(exchange)
+              } else {
+                None
+              }
+            })
+        }
+      }
+    }
+    Some(_) -> None
+  }
+}
+
+fn intent_payload_to_claim_assets(payload: IntentPayload) -> Option<AssetList> {
+  when payload is {
+    ExchangeIntent{offer, demand} -> when offer is {
+      [] -> Some(demand)
+      _ -> None
+    }
+    _ -> None
   }
 }
